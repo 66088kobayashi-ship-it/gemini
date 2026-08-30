@@ -1,0 +1,74 @@
+name: Claude x Gemini Dialogue
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "対話のお題"
+        required: true
+        type: string
+      turns:
+        description: "最大ターン数（40まで）"
+        required: false
+        type: string
+        default: "6"
+      first:
+        description: "先攻"
+        required: false
+        type: choice
+        options:
+          - claude
+          - gemini
+        default: claude
+      claude_persona:
+        description: "Claude のペルソナ（任意）"
+        required: false
+        type: string
+        default: ""
+      gemini_persona:
+        description: "Gemini のペルソナ（任意）"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  dialogue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run dialogue
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python dialogue.py \
+            --topic "${{ inputs.topic }}" \
+            --turns "${{ inputs.turns }}" \
+            --first "${{ inputs.first }}" \
+            --claude-persona "${{ inputs.claude_persona }}" \
+            --gemini-persona "${{ inputs.gemini_persona }}"
+
+      - name: Commit transcript
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add transcripts/
+          git diff --cached --quiet || git commit -m "Add dialogue transcript"
+          git push
+
+      - name: Upload transcript artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript
+          path: transcripts/*.md
