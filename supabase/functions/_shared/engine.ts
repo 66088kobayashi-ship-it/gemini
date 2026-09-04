@@ -1,0 +1,253 @@
+// 実行計画の型・視点変換・巡回・消費計算。すべて純粋関数（HTTP/DBに触れない）。
+// Deno / ブラウザどちらからも import できるよう、標準構文のみ使用する。
+
+export interface PlanStep {
+  role: string; // 役ID（"propose" / "critic" / "check" など）
+  model: string; // provider/model 形式の OpenRouter モデルID
+}
+
+export interface Plan {
+  before: PlanStep[];
+  loop: PlanStep[];
+  after: PlanStep[];
+  rounds: number;
+  criteria: string;
+}
+
+export interface TranscriptEntry {
+  participantId: string; // 例: "loop:0"。役が重複しても一意
+  role: string; // その参加者の役ID（"propose" 等）
+  label: string; // 表示名（他人の発言に前置される）
+  text: string;
+}
+
+export interface AdapterMessage {
+  role: "assistant" | "user";
+  content: string;
+}
+
+export const CHECK_ROLE = "check";
+export const PASS_MARK = "PASS";
+export const FAIL_MARK = "FAIL";
+
+export const ROLE_LABELS: Record<string, string> = {
+  propose: "提案",
+  critic: "批判",
+  check: "検収",
+  research: "調査",
+  digest: "要約",
+};
+
+export function labelFor(role: string): string {
+  return ROLE_LABELS[role] ?? role;
+}
+
+/** 消費回数 = before + loop*rounds + after。クライアント申告値は使わず、
+ * サーバー側は常にこの関数で再計算する。 */
+export function callsPlanned(plan: Plan): number {
+  return plan.before.length + plan.loop.length * plan.rounds + plan.after.length;
+}
+
+interface FlatStep {
+  participantId: string;
+  role: string;
+  model: string;
+  round: number | null; // before/after は null
+}
+
+/** 3区間 × 周回を、実行順どおりの一直線の配列に展開する。分岐はない。 */
+export function flattenSteps(plan: Plan): FlatStep[] {
+  const steps: FlatStep[] = [];
+  plan.before.forEach((s, i) => {
+    steps.push({ participantId: `before:${i}`, role: s.role, model: s.model, round: null });
+  });
+  for (let r = 0; r < plan.rounds; r++) {
+    plan.loop.forEach((s, i) => {
+      steps.push({ participantId: `loop:${i}`, role: s.role, model: s.model, round: r });
+    });
+  }
+  plan.after.forEach((s, i) => {
+    steps.push({ participantId: `after:${i}`, role: s.role, model: s.model, round: null });
+  });
+  return steps;
+}
+
+function totalParticipants(plan: Plan): number {
+  return plan.before.length + plan.loop.length + plan.after.length;
+}
+
+/** 条件と役割を毎ターンの system prompt に明記する。文脈窓を切り詰めても
+ * 失われないようにするため。検収役は判定のみに強く縛る。 */
+export function buildSystemPrompt(plan: Plan, role: string): string {
+  const lines = [
+    `あなたは「${labelFor(role)}」役としてAIの輪に参加しています。`,
+    `条件: ${plan.criteria}`,
+  ];
+  if (role === CHECK_ROLE) {
+    lines.push(
+      `あなたの出力は判定のみです。以下の形式を厳守してください。`,
+      `条件をすべて満たしていれば、行頭に "${PASS_MARK}" とだけ書く。`,
+      `満たしていなければ、行頭に "${FAIL_MARK}" と書き、続けて未達の項目とその理由のみを書く。`,
+      `改善案・代替案・提案は絶対に書かない。`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/** 中立な transcript を、呼ぶ側（participantId）の視点に変換する。
+ * 自分の発言→assistant、他人の発言→user。3人以上のときは他人の発言の
+ * 本文先頭に発言者名を付ける。窓を切った結果、先頭が自分の発言になる場合は
+ * その要素を捨てる（配列の先頭は必ず他人の発言でなければならない）。 */
+export function buildMessages(
+  transcript: TranscriptEntry[],
+  participantId: string,
+  plan: Plan,
+  window: number,
+): AdapterMessage[] {
+  const windowed = window > 0 ? transcript.slice(-window) : transcript.slice();
+
+  let start = 0;
+  while (start < windowed.length && windowed[start].participantId === participantId) {
+    start++;
+  }
+  const trimmed = windowed.slice(start);
+
+  const multiParty = totalParticipants(plan) >= 3;
+
+  return trimmed.map((entry) => {
+    if (entry.participantId === participantId) {
+      return { role: "assistant", content: entry.text };
+    }
+    const content = multiParty ? `[${entry.label}] ${entry.text}` : entry.text;
+    return { role: "user", content };
+  });
+}
+
+export interface CallModelArgs {
+  systemPrompt: string;
+  messages: AdapterMessage[];
+  model: string;
+}
+
+export type CallModelFn = (args: CallModelArgs) => Promise<string>;
+
+export interface RunResult {
+  transcript: TranscriptEntry[];
+  callsPlanned: number;
+  callsActual: number;
+  verdict: "PASS" | "FAIL" | null;
+}
+
+export interface RunPlanOptions {
+  callModel: CallModelFn;
+  window?: number;
+  onEntry?: (entry: TranscriptEntry) => void;
+}
+
+/** 計画を最初から最後まで実行する。分岐はなく、常に一直線。
+ * 検収役が PASS を返した時点で、残りの区間があっても即座に打ち切る。 */
+export async function runPlan(plan: Plan, opts: RunPlanOptions): Promise<RunResult> {
+  const window = opts.window ?? 12;
+  const steps = flattenSteps(plan);
+  const transcript: TranscriptEntry[] = [];
+  let verdict: "PASS" | "FAIL" | null = null;
+
+  for (const step of steps) {
+    const systemPrompt = buildSystemPrompt(plan, step.role);
+    const messages = buildMessages(transcript, step.participantId, plan, window);
+    const text = await opts.callModel({ systemPrompt, messages, model: step.model });
+
+    const entry: TranscriptEntry = {
+      participantId: step.participantId,
+      role: step.role,
+      label: labelFor(step.role),
+      text,
+    };
+    transcript.push(entry);
+    opts.onEntry?.(entry);
+
+    if (step.role === CHECK_ROLE) {
+      const trimmed = text.trim();
+      if (trimmed.startsWith(PASS_MARK)) {
+        verdict = "PASS";
+        break;
+      }
+      if (trimmed.startsWith(FAIL_MARK)) {
+        verdict = "FAIL";
+      }
+    }
+  }
+
+  return {
+    transcript,
+    callsPlanned: callsPlanned(plan),
+    callsActual: transcript.length,
+    verdict,
+  };
+}
+
+/** UTC の日付境界。JST の0時では絶対にリセットされない。 */
+export function utcDay(date: Date = new Date()): string {
+  return date.toISOString().slice(0, 10);
+}
+
+export interface ValidationError {
+  status: number;
+  message: string;
+}
+
+/** /run のバリデーション。criteria が空なら 400。 */
+export function validatePlan(plan: Plan): ValidationError | null {
+  if (!plan.criteria || plan.criteria.trim().length === 0) {
+    return { status: 400, message: "criteria must not be empty" };
+  }
+  if (!Array.isArray(plan.loop) || plan.loop.length === 0) {
+    return { status: 400, message: "loop must have at least one step" };
+  }
+  if (!Number.isInteger(plan.rounds) || plan.rounds < 1) {
+    return { status: 400, message: "rounds must be a positive integer" };
+  }
+  return null;
+}
+
+export interface QuotaCheck {
+  ok: boolean;
+  remaining: number;
+}
+
+/** 呼び出し前の残量チェック。calls > remaining なら実行を始めない。 */
+export function checkQuota(usedToday: number, limit: number, callsNeeded: number): QuotaCheck {
+  const remaining = limit - usedToday;
+  return { ok: callsNeeded <= remaining, remaining };
+}
+
+export type ExecuteRunResult =
+  | { kind: "invalid"; status: number; message: string }
+  | { kind: "quota_exceeded"; status: 409; remaining: number; needed: number }
+  | { kind: "ok"; result: RunResult };
+
+/** /run のロジック本体（HTTP/認証/DBを含まない）。
+ * JWT検証・allowlist照合はこれを呼び出す側（Edge Function）の責務。
+ * 順序は必ず: 1) criteria検証 2) 消費回数の再計算 3) 残量チェック 4) 実行。
+ * 逆順にすると1回分超過するため、この関数の外でも順序を変えないこと。 */
+export async function executeRun(
+  plan: Plan,
+  usedToday: number,
+  dailyLimit: number,
+  callModel: CallModelFn,
+  window = 12,
+): Promise<ExecuteRunResult> {
+  const invalid = validatePlan(plan);
+  if (invalid) {
+    return { kind: "invalid", status: invalid.status, message: invalid.message };
+  }
+
+  const needed = callsPlanned(plan);
+  const quota = checkQuota(usedToday, dailyLimit, needed);
+  if (!quota.ok) {
+    return { kind: "quota_exceeded", status: 409, remaining: quota.remaining, needed };
+  }
+
+  const result = await runPlan(plan, { callModel, window });
+  return { kind: "ok", result };
+}

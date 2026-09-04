@@ -1,0 +1,311 @@
+import { assert, assertEquals, assertNotEquals } from "./test_util.ts";
+import {
+  buildMessages,
+  buildSystemPrompt,
+  callsPlanned,
+  CallModelFn,
+  checkQuota,
+  executeRun,
+  Plan,
+  runPlan,
+  TranscriptEntry,
+  utcDay,
+  validatePlan,
+} from "./engine.ts";
+
+function makePlan(overrides: Partial<Plan> = {}): Plan {
+  return {
+    before: [],
+    loop: [
+      { role: "propose", model: "openrouter/free-a" },
+      { role: "critic", model: "openrouter/free-b" },
+    ],
+    after: [],
+    rounds: 3,
+    criteria: "根拠のない主張を残さない／800字以内",
+    ...overrides,
+  };
+}
+
+function loopOf(n: number) {
+  const roles = ["propose", "critic", "check", "research", "digest"];
+  return Array.from({ length: n }, (_, i) => ({
+    role: roles[i % roles.length],
+    model: `openrouter/free-${i}`,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// 消費回数の一致（最重要）
+// ---------------------------------------------------------------------------
+
+Deno.test("callsPlanned matches loop x rounds across combinations", () => {
+  for (const n of [2, 3, 5]) {
+    for (const rounds of [1, 3, 10]) {
+      const plan = makePlan({ loop: loopOf(n), rounds });
+      assertEquals(callsPlanned(plan), n * rounds);
+    }
+  }
+});
+
+Deno.test("callsPlanned includes before/after (v2 pre-check)", () => {
+  const plan = makePlan({
+    before: [{ role: "research", model: "m" }],
+    loop: loopOf(3),
+    after: [{ role: "digest", model: "m" }],
+    rounds: 4,
+  });
+  assertEquals(callsPlanned(plan), 1 + 3 * 4 + 1);
+});
+
+Deno.test("runPlan's actual call count matches callsPlanned when no early exit", async () => {
+  for (const n of [2, 3, 5]) {
+    for (const rounds of [1, 3, 10]) {
+      const plan = makePlan({ loop: loopOf(n), rounds });
+      let calls = 0;
+      const callModel: CallModelFn = async () => {
+        calls++;
+        return "何かしらの応答";
+      };
+      const result = await runPlan(plan, { callModel });
+      assertEquals(calls, callsPlanned(plan));
+      assertEquals(result.callsActual, callsPlanned(plan));
+    }
+  }
+});
+
+Deno.test("runPlan honors before/after in actual call count (v2 pre-check)", async () => {
+  const plan = makePlan({
+    before: [{ role: "research", model: "m" }],
+    loop: loopOf(2),
+    after: [{ role: "digest", model: "m" }],
+    rounds: 2,
+  });
+  let calls = 0;
+  const callModel: CallModelFn = async () => {
+    calls++;
+    return "応答";
+  };
+  const result = await runPlan(plan, { callModel });
+  assertEquals(calls, 1 + 2 * 2 + 1);
+  assertEquals(result.callsActual, 1 + 2 * 2 + 1);
+});
+
+Deno.test("early PASS: actual calls is less than planned, not the plan value", async () => {
+  const plan = makePlan({
+    loop: [
+      { role: "propose", model: "m" },
+      { role: "critic", model: "m" },
+      { role: "check", model: "m" },
+    ],
+    rounds: 5,
+  });
+  let calls = 0;
+  const callModel: CallModelFn = async ({ systemPrompt }) => {
+    calls++;
+    if (systemPrompt.includes("検収")) return "PASS";
+    return "応答";
+  };
+  const result = await runPlan(plan, { callModel });
+  // 1周目で PASS するはずなので、3回だけ呼ばれる（15回ではない）
+  assertEquals(calls, 3);
+  assertEquals(result.callsActual, 3);
+  assertNotEquals(result.callsActual, callsPlanned(plan));
+  assertEquals(result.verdict, "PASS");
+});
+
+// ---------------------------------------------------------------------------
+// 視点変換
+// ---------------------------------------------------------------------------
+
+Deno.test("buildMessages: self -> assistant, other -> user", () => {
+  const plan = makePlan({ loop: loopOf(2) });
+  const transcript: TranscriptEntry[] = [
+    { participantId: "loop:1", role: "critic", label: "批判", text: "他人の発言1" },
+    { participantId: "loop:0", role: "propose", label: "提案", text: "自分の発言1" },
+  ];
+  const messages = buildMessages(transcript, "loop:0", plan, 12);
+  assertEquals(messages, [
+    { role: "user", content: "他人の発言1" },
+    { role: "assistant", content: "自分の発言1" },
+  ]);
+});
+
+Deno.test("buildMessages: 3人以上のとき他人の発言に発言者名を前置する", () => {
+  const plan = makePlan({ loop: loopOf(3) });
+  const transcript: TranscriptEntry[] = [
+    { participantId: "loop:1", role: "critic", label: "批判", text: "出典がない。" },
+    { participantId: "loop:2", role: "check", label: "検収", text: "未達1件。" },
+  ];
+  const messages = buildMessages(transcript, "loop:0", plan, 12);
+  assertEquals(messages[0].content, "[批判] 出典がない。");
+  assertEquals(messages[1].content, "[検収] 未達1件。");
+});
+
+Deno.test("buildMessages: 2人のときは発言者名を付けない", () => {
+  const plan = makePlan({ loop: loopOf(2) });
+  const transcript: TranscriptEntry[] = [
+    { participantId: "loop:1", role: "critic", label: "批判", text: "出典がない。" },
+  ];
+  const messages = buildMessages(transcript, "loop:0", plan, 12);
+  assertEquals(messages[0].content, "出典がない。");
+});
+
+Deno.test("buildMessages: 全ターンで配列の先頭が他人の発言（窓を切り詰めても）", () => {
+  const plan = makePlan({ loop: loopOf(3) });
+  const participants = ["loop:0", "loop:1", "loop:2"];
+  // 5周分の transcript をでっち上げる
+  const transcript: TranscriptEntry[] = [];
+  for (let r = 0; r < 5; r++) {
+    for (const pid of participants) {
+      transcript.push({ participantId: pid, role: pid, label: pid, text: `${pid}-${r}` });
+    }
+  }
+  for (const window of [1, 2, 3, 4, 5, 6, 7, 12, 999]) {
+    for (const me of participants) {
+      const messages = buildMessages(transcript, me, plan, window);
+      if (messages.length === 0) continue;
+      assertEquals(
+        messages[0].role,
+        "user",
+        `window=${window} me=${me} で先頭が assistant になった`,
+      );
+    }
+  }
+});
+
+Deno.test("buildMessages: 窓のサイズを超えないこと", () => {
+  const plan = makePlan({ loop: loopOf(2) });
+  const transcript: TranscriptEntry[] = Array.from({ length: 20 }, (_, i) => ({
+    participantId: i % 2 === 0 ? "loop:0" : "loop:1",
+    role: i % 2 === 0 ? "propose" : "critic",
+    label: i % 2 === 0 ? "提案" : "批判",
+    text: `t${i}`,
+  }));
+  const messages = buildMessages(transcript, "loop:0", plan, 4);
+  assert(messages.length <= 4);
+});
+
+Deno.test("runPlan: 全ターンの system prompt に条件の文字列が含まれる", async () => {
+  const plan = makePlan({ loop: loopOf(3), rounds: 2, criteria: "一意なお題マーカーXYZ" });
+  const seenPrompts: string[] = [];
+  const callModel: CallModelFn = async ({ systemPrompt }) => {
+    seenPrompts.push(systemPrompt);
+    return "応答";
+  };
+  await runPlan(plan, { callModel });
+  assert(seenPrompts.length > 0);
+  for (const p of seenPrompts) {
+    assert(p.includes("一意なお題マーカーXYZ"), `system prompt に条件が含まれない: ${p}`);
+  }
+});
+
+Deno.test("buildSystemPrompt: 検収役は判定のみに縛られ、改善案を書かせる文言がない", () => {
+  const plan = makePlan();
+  const prompt = buildSystemPrompt(plan, "check");
+  assert(prompt.includes("PASS"));
+  assert(prompt.includes("FAIL"));
+  assert(!prompt.includes("改善案を書"));
+});
+
+// ---------------------------------------------------------------------------
+// 制御
+// ---------------------------------------------------------------------------
+
+Deno.test("executeRun: criteria が空だと invalid で、1回もAPIを呼ばない", async () => {
+  const plan = makePlan({ criteria: "" });
+  let calls = 0;
+  const callModel: CallModelFn = async () => {
+    calls++;
+    return "応答";
+  };
+  const result = await executeRun(plan, 0, 50, callModel);
+  assertEquals(result.kind, "invalid");
+  assertEquals(calls, 0);
+});
+
+Deno.test("executeRun: 残量不足のとき quota_exceeded で、1回もAPIを呼ばない", async () => {
+  const plan = makePlan({ loop: loopOf(3), rounds: 10 }); // 30回必要
+  let calls = 0;
+  const callModel: CallModelFn = async () => {
+    calls++;
+    return "応答";
+  };
+  const result = await executeRun(plan, 45, 50, callModel); // 残り5回しかない
+  assertEquals(result.kind, "quota_exceeded");
+  assertEquals(calls, 0);
+});
+
+Deno.test("executeRun: 検収役が PASS を返したらループが即座に終わる", async () => {
+  const plan = makePlan({
+    loop: [
+      { role: "propose", model: "m" },
+      { role: "check", model: "m" },
+    ],
+    rounds: 10,
+  });
+  const callModel: CallModelFn = async ({ systemPrompt }) =>
+    systemPrompt.includes("検収") ? "PASS" : "応答";
+  const result = await executeRun(plan, 0, 100, callModel);
+  assert(result.kind === "ok");
+  if (result.kind === "ok") {
+    assertEquals(result.result.callsActual, 2);
+    assertEquals(result.result.verdict, "PASS");
+  }
+});
+
+Deno.test("executeRun: クライアントの calls 申告は無視し、サーバー側の再計算で判定する", async () => {
+  // callsPlanned に相当する値をプラン外から渡す経路が存在しないことを、
+  // 型シグネチャ自体で保証する（executeRun は Plan しか受け取らない）。
+  // ここでは意図的に不正な「申告値」を模した引数を混ぜても影響しないことを確認する。
+  const plan = makePlan({ loop: loopOf(3), rounds: 10 }); // 実際は30回必要
+  const clientClaimedCalls = 1; // クライアントが偽って送ってきた値（使われない）
+  let calls = 0;
+  const callModel: CallModelFn = async () => {
+    calls++;
+    return "応答";
+  };
+  // 残り5回しかない状態で、実際に必要な30回に対して判定されることを確認
+  const result = await executeRun(plan, 45, 50, callModel);
+  assertEquals(result.kind, "quota_exceeded");
+  if (result.kind === "quota_exceeded") {
+    assertEquals(result.needed, 30);
+    assertNotEquals(result.needed, clientClaimedCalls);
+  }
+  assertEquals(calls, 0);
+});
+
+Deno.test("checkQuota: calls > remaining は ok=false", () => {
+  assertEquals(checkQuota(45, 50, 5), { ok: true, remaining: 5 });
+  assertEquals(checkQuota(45, 50, 6), { ok: false, remaining: 5 });
+});
+
+Deno.test("validatePlan: criteria 空は 400", () => {
+  const err = validatePlan(makePlan({ criteria: "  " }));
+  assert(err !== null);
+  assertEquals(err?.status, 400);
+});
+
+Deno.test("validatePlan: loop が空は 400", () => {
+  const err = validatePlan(makePlan({ loop: [] }));
+  assert(err !== null);
+  assertEquals(err?.status, 400);
+});
+
+// ---------------------------------------------------------------------------
+// 日付境界（UTC）
+// ---------------------------------------------------------------------------
+
+Deno.test("utcDay: UTCの日付が変わるとリセットされる", () => {
+  const before = utcDay(new Date("2026-09-04T23:59:59Z"));
+  const after = utcDay(new Date("2026-09-05T00:00:01Z"));
+  assertEquals(before, "2026-09-04");
+  assertEquals(after, "2026-09-05");
+  assertNotEquals(before, after);
+});
+
+Deno.test("utcDay: JSTの0時ではリセットされない（UTC 15:00 相当）", () => {
+  // JST 2026-09-05 00:00:01 は UTC 2026-09-04 15:00:01
+  const jstMidnight = utcDay(new Date("2026-09-04T15:00:01Z"));
+  assertEquals(jstMidnight, "2026-09-04");
+});
