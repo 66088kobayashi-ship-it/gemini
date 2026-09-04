@@ -1,11 +1,13 @@
-import { assert, assertEquals } from "../supabase/functions/_shared/test_util.ts";
+import { assert, assertEquals, assertThrows } from "../supabase/functions/_shared/test_util.ts";
 import {
   applyModelConfig,
   buildRunBody,
   canSubmit,
+  composeRunRequest,
   groupByLap,
   interpretRunResponse,
   mapErrorMessage,
+  stripBossEntry,
 } from "./logic.js";
 
 // ---------------------------------------------------------------------------
@@ -14,7 +16,7 @@ import {
 
 Deno.test("buildRunBody: before/after が空でも配列として含まれる", () => {
   const plan = { before: [], loop: [{ role: "propose", model: "m1" }], after: [], rounds: 3 };
-  const body = buildRunBody(plan, "条件");
+  const body = buildRunBody(plan, "条件", "指示");
   assertEquals(Array.isArray(body.plan.before), true);
   assertEquals(Array.isArray(body.plan.after), true);
   assertEquals(body.plan.before, []);
@@ -23,7 +25,7 @@ Deno.test("buildRunBody: before/after が空でも配列として含まれる", 
 
 Deno.test("buildRunBody: before/after未指定でも配列として含まれる（省略しない）", () => {
   const plan = { loop: [{ role: "propose", model: "m1" }], rounds: 1 };
-  const body = buildRunBody(plan, "条件");
+  const body = buildRunBody(plan, "条件", "指示");
   assert("before" in body.plan);
   assert("after" in body.plan);
   assertEquals(body.plan.before, []);
@@ -37,10 +39,71 @@ Deno.test("buildRunBody: loopはrole/modelだけを送る", () => {
     after: [],
     rounds: 2,
   };
-  const body = buildRunBody(plan, "条件");
+  const body = buildRunBody(plan, "条件", "指示");
   assertEquals(body.plan.loop, [{ role: "propose", model: "openrouter/free-a" }]);
   assertEquals(body.plan.criteria, "条件");
   assertEquals(body.plan.rounds, 2);
+});
+
+Deno.test("buildRunBody: instructionが必ず含まれ、criteriaと結合されない", () => {
+  const plan = { before: [], loop: [{ role: "propose", model: "m1" }], after: [], rounds: 1 };
+  const body = buildRunBody(plan, "800字以内でまとめる", "新製品の告知文を書いてほしい");
+  assert("instruction" in body.plan);
+  assertEquals(body.plan.instruction, "新製品の告知文を書いてほしい");
+  assertEquals(body.plan.criteria, "800字以内でまとめる");
+  // 結合されていれば片方の文字列にもう片方が混ざる。混ざっていないことを確認する
+  assert(!body.plan.criteria.includes("告知文"));
+  assert(!body.plan.instruction.includes("800字"));
+});
+
+Deno.test("buildRunBody: instructionが空/未指定だと即座に例外になる（渡し忘れを検出する）", () => {
+  const plan = { before: [], loop: [{ role: "propose", model: "m1" }], after: [], rounds: 1 };
+  assertThrows(() => buildRunBody(plan, "条件", ""));
+  assertThrows(() => buildRunBody(plan, "条件", undefined));
+});
+
+// ---------------------------------------------------------------------------
+// composeRunRequest: index.html の start() が呼ぶ唯一の入口
+// ---------------------------------------------------------------------------
+
+const ROLES_FIXTURE = {
+  propose: { model: "openrouter/free-a" },
+  critic: { model: "openrouter/free-b" },
+};
+
+Deno.test("composeRunRequest: 指示欄のテキスト(promptText)がinstructionとして届く", () => {
+  const body = composeRunRequest({
+    loopNodes: [{ kind: "propose" }, { kind: "critic" }],
+    roles: ROLES_FIXTURE,
+    rounds: 3,
+    criteriaText: "800字以内でまとめる",
+    promptText: "新製品の告知文を書いてほしい",
+  });
+  assertEquals(body.plan.instruction, "新製品の告知文を書いてほしい");
+  assertEquals(body.plan.criteria, "800字以内でまとめる");
+  assertEquals(body.plan.loop, [
+    { role: "propose", model: "openrouter/free-a" },
+    { role: "critic", model: "openrouter/free-b" },
+  ]);
+});
+
+Deno.test("composeRunRequest: 【これがいま起きていたバグそのもの】promptTextを使わずに組み立てると検出できる", () => {
+  // 実際に起きていた不具合は「吹き出し表示にだけ text を使い、/run には渡さない」
+  // というものだった。ここではそれを composeRunRequest の呼び出し側で再現する:
+  // promptText を渡さず、表示用の text 相当を別の変数に閉じ込めて捨てる。
+  const displayOnlyText = "新製品の告知文を書いてほしい"; // 吹き出し表示にしか使わない、というバグを模す
+  assertThrows(
+    () =>
+      composeRunRequest({
+        loopNodes: [{ kind: "propose" }, { kind: "critic" }],
+        roles: ROLES_FIXTURE,
+        rounds: 3,
+        criteriaText: "800字以内でまとめる",
+        promptText: undefined as unknown as string, // displayOnlyText を渡し忘れている状態
+      }),
+    "instructionを渡し忘れても例外にならず、モデルに届かないまま実行できてしまっている",
+  );
+  void displayOnlyText;
 });
 
 // ---------------------------------------------------------------------------
@@ -186,4 +249,33 @@ Deno.test("groupByLap: loop長ごとに周回を区切る", () => {
   const laps = groupByLap(transcript, 2);
   assertEquals(laps.length, 3);
   assertEquals(laps[0].length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// stripBossEntry: instructionの二重表示・周回ずれの防止
+// ---------------------------------------------------------------------------
+
+Deno.test("stripBossEntry: role:bossの要素を取り除く", () => {
+  const transcript = [
+    { participantId: "boss", role: "boss", label: "指示", text: "書いて" },
+    { participantId: "loop:0", role: "propose", label: "提案", text: "初稿" },
+    { participantId: "loop:1", role: "critic", label: "批判", text: "指摘" },
+  ];
+  const stripped = stripBossEntry(transcript);
+  assertEquals(stripped.length, 2);
+  assertEquals(stripped.every((e) => e.role !== "boss"), true);
+});
+
+Deno.test("stripBossEntry後にgroupByLapすると周回がずれない", () => {
+  const transcript = [
+    { participantId: "boss", role: "boss", label: "指示", text: "書いて" },
+    { participantId: "loop:0", role: "propose", label: "提案", text: "r1-propose" },
+    { participantId: "loop:1", role: "critic", label: "批判", text: "r1-critic" },
+    { participantId: "loop:0", role: "propose", label: "提案", text: "r2-propose" },
+    { participantId: "loop:1", role: "critic", label: "批判", text: "r2-critic" },
+  ];
+  const laps = groupByLap(stripBossEntry(transcript), 2);
+  assertEquals(laps.length, 2);
+  assertEquals(laps[0].map((e) => e.role), ["propose", "critic"]);
+  assertEquals(laps[1].map((e) => e.role), ["propose", "critic"]);
 });

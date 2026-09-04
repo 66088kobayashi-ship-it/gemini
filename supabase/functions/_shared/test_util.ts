@@ -41,3 +41,15 @@ export function assertNotEquals<T>(actual: T, expected: T, msg?: string): void {
     throw new Error(msg ?? `assertNotEquals failed: both were ${JSON.stringify(actual)}`);
   }
 }
+
+export function assertThrows(fn: () => unknown, msg?: string): void {
+  let threw = false;
+  try {
+    fn();
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error(msg ?? "assertThrows failed: function did not throw");
+  }
+}

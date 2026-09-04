@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertNotEquals } from "./test_util.ts";
 import {
+  BOSS_PARTICIPANT_ID,
   buildMessages,
   buildSystemPrompt,
   callsPlanned,
@@ -23,6 +24,7 @@ function makePlan(overrides: Partial<Plan> = {}): Plan {
     after: [],
     rounds: 3,
     criteria: "根拠のない主張を残さない／800字以内",
+    instruction: "新製品の告知文を書いてほしい",
     ...overrides,
   };
 }
@@ -209,6 +211,79 @@ Deno.test("buildSystemPrompt: 検収役は判定のみに縛られ、改善案�
 });
 
 // ---------------------------------------------------------------------------
+// instruction（何をしてほしいか）: criteria（どうなったら終わりか）とは別経路
+// ---------------------------------------------------------------------------
+
+Deno.test("runPlan: instruction が transcript の先頭に入り、role: user になる", async () => {
+  const plan = makePlan({ loop: loopOf(2), instruction: "新製品の告知文を書いてほしい" });
+  const callModel: CallModelFn = async () => "応答";
+  const result = await runPlan(plan, { callModel });
+  assertEquals(result.transcript[0].participantId, BOSS_PARTICIPANT_ID);
+  assertEquals(result.transcript[0].text, "新製品の告知文を書いてほしい");
+
+  // 1手目（loop:0）から見た messages の先頭が instruction で、role が user
+  const messages = buildMessages([result.transcript[0]], "loop:0", plan, 12);
+  assertEquals(messages[0].role, "user");
+  assertEquals(messages[0].content.includes("新製品の告知文を書いてほしい"), true);
+});
+
+Deno.test("runPlan: instruction はAPI呼び出しに数えない（callsActualがずれない）", async () => {
+  const plan = makePlan({ loop: loopOf(2), rounds: 3, instruction: "書いて" });
+  let calls = 0;
+  const callModel: CallModelFn = async () => {
+    calls++;
+    return "応答";
+  };
+  const result = await runPlan(plan, { callModel });
+  assertEquals(calls, callsPlanned(plan));
+  assertEquals(result.callsActual, callsPlanned(plan));
+  // transcript には instruction 分の1件が追加で乗るので、callsActual とは一致しない
+  assertEquals(result.transcript.length, callsPlanned(plan) + 1);
+});
+
+Deno.test("buildSystemPrompt: instruction は system prompt に含まれない（criteriaとは別経路）", () => {
+  const plan = makePlan({
+    criteria: "800字以内でまとめる",
+    instruction: "新製品の告知文を書いてほしい",
+  });
+  const prompt = buildSystemPrompt(plan, "propose");
+  assert(prompt.includes("800字以内でまとめる"), "criteriaが system prompt に無い");
+  assert(!prompt.includes("新製品の告知文を書いてほしい"), "instructionが system prompt に漏れている");
+});
+
+Deno.test("criteria と instruction は結合されて1つの文字列になっていない", () => {
+  const plan = makePlan({
+    criteria: "800字以内でまとめる",
+    instruction: "新製品の告知文を書いてほしい",
+  });
+  // 型レベルで別フィールド
+  assertNotEquals(plan.criteria, plan.instruction);
+  // instructionの実体（transcriptに乗る文字列）がcriteriaと結合されていない
+  assertEquals(plan.instruction, "新製品の告知文を書いてほしい");
+  assert(!plan.instruction.includes(plan.criteria));
+});
+
+Deno.test("buildMessages: 窓を切り詰めてinstructionが落ちても、先頭が自分の発言にならない", () => {
+  const plan = makePlan({ loop: loopOf(3), instruction: "書いて" });
+  const transcript: TranscriptEntry[] = [
+    { participantId: BOSS_PARTICIPANT_ID, role: "boss", label: "指示", text: "書いて" },
+  ];
+  for (let r = 0; r < 5; r++) {
+    for (const pid of ["loop:0", "loop:1", "loop:2"]) {
+      transcript.push({ participantId: pid, role: pid, label: pid, text: `${pid}-${r}` });
+    }
+  }
+  // window=1 は instruction を含む先頭要素を確実に切り落とす
+  for (const window of [1, 2, 3]) {
+    for (const me of ["loop:0", "loop:1", "loop:2"]) {
+      const messages = buildMessages(transcript, me, plan, window);
+      if (messages.length === 0) continue;
+      assertEquals(messages[0].role, "user", `window=${window} me=${me}`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 制御
 // ---------------------------------------------------------------------------
 
@@ -222,6 +297,24 @@ Deno.test("executeRun: criteria が空だと invalid で、1回もAPIを呼ば�
   const result = await executeRun(plan, 0, 50, callModel);
   assertEquals(result.kind, "invalid");
   assertEquals(calls, 0);
+});
+
+Deno.test("executeRun: instruction が空だと invalid で、1回もAPIを呼ばない", async () => {
+  const plan = makePlan({ instruction: "" });
+  let calls = 0;
+  const callModel: CallModelFn = async () => {
+    calls++;
+    return "応答";
+  };
+  const result = await executeRun(plan, 0, 50, callModel);
+  assertEquals(result.kind, "invalid");
+  assertEquals(calls, 0);
+});
+
+Deno.test("validatePlan: instruction 空は 400", () => {
+  const err = validatePlan(makePlan({ instruction: "   " }));
+  assert(err !== null);
+  assertEquals(err?.status, 400);
 });
 
 Deno.test("executeRun: 残量不足のとき quota_exceeded で、1回もAPIを呼ばない", async () => {

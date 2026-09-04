@@ -115,8 +115,9 @@ function coercePlan(rawBody: unknown): Plan | null {
 
   if (typeof p.rounds !== "number" || !Number.isInteger(p.rounds)) return null;
   if (typeof p.criteria !== "string") return null;
+  if (typeof p.instruction !== "string") return null;
 
-  return { before, loop, after, rounds: p.rounds, criteria: p.criteria };
+  return { before, loop, after, rounds: p.rounds, criteria: p.criteria, instruction: p.instruction };
 }
 
 export async function handleRun(

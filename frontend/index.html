@@ -281,11 +281,12 @@ body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;p
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   applyModelConfig,
-  buildRunBody,
   canSubmit,
+  composeRunRequest,
   groupByLap,
   interpretRunResponse,
   mapErrorMessage,
+  stripBossEntry,
 } from "./logic.js";
 
 // ---------------------------------------------------------------------------
@@ -580,7 +581,9 @@ supabase.auth.onAuthStateChange((_event, session)=>{
 // ---------------------------------------------------------------------------
 
 function renderTranscript(transcript){
-  const laps=groupByLap(transcript, plan.loop.length);
+  // instruction（ボスの発言）はsend時点で自分のバブルとして既に表示済みなので、
+  // ここで除いておかないと二重表示になり、周回のグルーピングもずれる。
+  const laps=groupByLap(stripBossEntry(transcript), plan.loop.length);
   laps.forEach((lapEntries,lapIndex)=>{
     const tag=document.createElement('div');
     tag.className='lap'; tag.textContent=`${lapIndex+1}周目`;
@@ -627,10 +630,10 @@ async function start(){
 
   let res, body;
   try{
-    const runBody=buildRunBody(
-      { before:plan.before, loop:plan.loop.map(n=>({role:n.kind,model:ROLES[n.kind].model})), after:plan.after, rounds:plan.rounds },
-      critEl.value.trim(),
-    );
+    const runBody=composeRunRequest({
+      before:plan.before, loopNodes:plan.loop, roles:ROLES, after:plan.after, rounds:plan.rounds,
+      criteriaText:critEl.value.trim(), promptText:text,
+    });
     res=await fetch(`${FUNCTIONS_BASE}/run`,{
       method:'POST',
       headers:{ 'content-type':'application/json', Authorization:`Bearer ${session.access_token}` },

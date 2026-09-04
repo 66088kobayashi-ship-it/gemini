@@ -21,7 +21,7 @@ Deno.test("makePersistRun: record_run を1回だけ呼ぶ（read-then-writeに�
     day: "2026-09-04",
     callsActual: 6,
     callsPlanned: 6,
-    plan: { before: [], loop: [], after: [], rounds: 1, criteria: "x" },
+    plan: { before: [], loop: [], after: [], rounds: 1, criteria: "x", instruction: "y" },
     transcript: [],
     verdict: null,
   });
@@ -42,7 +42,7 @@ Deno.test("makePersistRun: RPCがエラーを返したら ok:false を返す（�
     day: "2026-09-04",
     callsActual: 3,
     callsPlanned: 3,
-    plan: { before: [], loop: [], after: [], rounds: 1, criteria: "x" },
+    plan: { before: [], loop: [], after: [], rounds: 1, criteria: "x", instruction: "y" },
     transcript: [],
     verdict: null,
   });

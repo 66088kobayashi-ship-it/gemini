@@ -20,6 +20,7 @@ function makePlanBody(overrides: Partial<Plan> = {}): unknown {
     after: [],
     rounds: 3,
     criteria: "根拠のない主張を残さない",
+    instruction: "新製品の告知文を書いてほしい",
     ...overrides,
   };
   return { plan };
@@ -73,6 +74,30 @@ Deno.test("handleRun: criteriaが空 -> 400, 呼び出し0回", async () => {
   const res = await handleRun("Bearer good-jwt", makePlanBody({ criteria: "" }), deps);
   assertEquals(res.status, 400);
   assertEquals(count(), 0);
+});
+
+Deno.test("handleRun: instructionが空 -> 400, 呼び出し0回", async () => {
+  const { fn, count } = countingCallModel();
+  const deps = baseDeps({ callModel: fn });
+  const res = await handleRun("Bearer good-jwt", makePlanBody({ instruction: "" }), deps);
+  assertEquals(res.status, 400);
+  assertEquals(count(), 0);
+});
+
+Deno.test("handleRun: リクエストボディのinstructionが正しくPlanへ渡る", async () => {
+  const plan = makePlanBody({ instruction: "新製品の告知文を書いてほしい" }) as {
+    plan: { instruction: string };
+  };
+  let seenInstruction: string | null = null;
+  const deps = baseDeps({
+    persistRun: async (input) => {
+      seenInstruction = input.plan.instruction;
+      return { ok: true, runId: "run-1" };
+    },
+  });
+  const res = await handleRun("Bearer good-jwt", plan, deps);
+  assertEquals(res.status, 200);
+  assertEquals(seenInstruction, "新製品の告知文を書いてほしい");
 });
 
 Deno.test("handleRun: 残量不足 -> 409, 呼び出し0回, persistRunも呼ばれない", async () => {

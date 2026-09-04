@@ -3,8 +3,16 @@
 // このファイルを直接 import する（同じファイルを両方から使う）。
 
 /** POST /run のボディを組み立てる。plan.before / plan.after が未指定でも
- * 常に配列として含める（省略すると calls の再計算が噛み合わなくなる）。 */
-export function buildRunBody(plan, criteria) {
+ * 常に配列として含める（省略すると calls の再計算が噛み合わなくなる）。
+ * criteria（どうなったら終わりか）と instruction（何をしてほしいか）は
+ * 結合せず、別フィールドのまま送る。
+ * instruction を渡し忘れる／空のまま呼ぶと、サーバーに届く前にここで
+ * 気づけるよう即座に例外にする（渡し忘れても200のまま黙って動いてしまう、
+ * という壊れ方を防ぐため）。 */
+export function buildRunBody(plan, criteria, instruction) {
+  if (!instruction || String(instruction).trim().length === 0) {
+    throw new Error("buildRunBody: instruction is required");
+  }
   return {
     plan: {
       before: (plan.before ?? []).map((s) => ({ role: s.role, model: s.model })),
@@ -12,8 +20,41 @@ export function buildRunBody(plan, criteria) {
       after: (plan.after ?? []).map((s) => ({ role: s.role, model: s.model })),
       rounds: plan.rounds,
       criteria,
+      instruction,
     },
   };
+}
+
+/**
+ * 画面の現在状態から /run のリクエストボディを組み立てる、唯一の入口。
+ * index.html の start() はこれだけを呼ぶ（buildRunBody を直接呼ばない）。
+ *
+ * 名前付き引数にしているのは、「指示欄に打った文字列 (promptText) を
+ * instruction として渡し忘れる」という不具合が実際に一度起きたため。
+ * 位置引数だと省略しても構文エラーにならず気づけないが、これなら
+ * promptText を渡し忘れれば buildRunBody が即座に例外を投げる。
+ *
+ * @param {{
+ *   before?: Array<{role: string, model: string}>,
+ *   loopNodes: Array<{kind: string}>,
+ *   roles: Record<string, {model: string}>,
+ *   after?: Array<{role: string, model: string}>,
+ *   rounds: number,
+ *   criteriaText: string,
+ *   promptText: string,
+ * }} args
+ */
+export function composeRunRequest({
+  before = [],
+  loopNodes,
+  roles,
+  after = [],
+  rounds,
+  criteriaText,
+  promptText,
+}) {
+  const loop = loopNodes.map((n) => ({ role: n.kind, model: roles[n.kind].model }));
+  return buildRunBody({ before, loop, after, rounds }, criteriaText, promptText);
 }
 
 /** 送信可能かどうかの判定。既存 UI の refresh() が持っていた条件をそのまま
@@ -109,8 +150,14 @@ export function applyModelConfig(defaults, overrides) {
   return merged;
 }
 
-/** transcript を周回ごとにグループ分けする。before/after が空である前提
- * （v1）で、loop の長さで単純に割る。 */
+/**
+ * transcript を周回ごとにグループ分けする。before/after が空である前提
+ * （v1）で、loop の長さで単純に割る。
+ * @template T
+ * @param {T[]} transcript
+ * @param {number} loopLength
+ * @returns {T[][]}
+ */
 export function groupByLap(transcript, loopLength) {
   if (loopLength <= 0) return [transcript];
   const laps = [];
@@ -118,4 +165,19 @@ export function groupByLap(transcript, loopLength) {
     laps.push(transcript.slice(i, i + loopLength));
   }
   return laps;
+}
+
+const BOSS_ROLE = "boss";
+
+/** /run が返す transcript から instruction（ボスの発言）を取り除く。
+ * フロントは指示テキストを送信直後に自分のバブルとして既に表示しているため、
+ * ここで取り除かないと groupByLap の周回対応がずれる（ボスの1件ぶん先頭に
+ * 混ざり、以降のグルーピングが loopLength ぶんずれ続ける）うえ、
+ * 二重表示にもなる。 */
+/**
+ * @param {Array<{role: string}>} transcript
+ * @returns {Array<{role: string}>}
+ */
+export function stripBossEntry(transcript) {
+  return transcript.filter((e) => e.role !== BOSS_ROLE);
 }

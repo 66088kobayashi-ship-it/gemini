@@ -11,7 +11,8 @@ export interface Plan {
   loop: PlanStep[];
   after: PlanStep[];
   rounds: number;
-  criteria: string;
+  criteria: string; // 「どうなったら終わりか」。毎ターンの system prompt に入る
+  instruction: string; // 「何をしてほしいか」。transcript の先頭に一度だけ入る
 }
 
 export interface TranscriptEntry {
@@ -29,6 +30,12 @@ export interface AdapterMessage {
 export const CHECK_ROLE = "check";
 export const PASS_MARK = "PASS";
 export const FAIL_MARK = "FAIL";
+
+// instruction を transcript の先頭に置くときの発言者。loop/before/after の
+// 参加者ID("loop:0" 等)とは絶対に衝突しない固定文字列。
+export const BOSS_PARTICIPANT_ID = "boss";
+export const BOSS_ROLE = "boss";
+export const BOSS_LABEL = "指示";
 
 export const ROLE_LABELS: Record<string, string> = {
   propose: "提案",
@@ -97,7 +104,9 @@ export function buildSystemPrompt(plan: Plan, role: string): string {
 /** 中立な transcript を、呼ぶ側（participantId）の視点に変換する。
  * 自分の発言→assistant、他人の発言→user。3人以上のときは他人の発言の
  * 本文先頭に発言者名を付ける。窓を切った結果、先頭が自分の発言になる場合は
- * その要素を捨てる（配列の先頭は必ず他人の発言でなければならない）。 */
+ * その要素を捨てる（配列の先頭は必ず他人の発言でなければならない）。
+ * 指示（boss）の発言は、人数に関わらず常に発言者名を付ける
+ * （付けないと、2人の輪では「指示」と「相手の発言」の区別がつかない）。 */
 export function buildMessages(
   transcript: TranscriptEntry[],
   participantId: string,
@@ -118,7 +127,8 @@ export function buildMessages(
     if (entry.participantId === participantId) {
       return { role: "assistant", content: entry.text };
     }
-    const content = multiParty ? `[${entry.label}] ${entry.text}` : entry.text;
+    const shouldLabel = multiParty || entry.participantId === BOSS_PARTICIPANT_ID;
+    const content = shouldLabel ? `[${entry.label}] ${entry.text}` : entry.text;
     return { role: "user", content };
   });
 }
@@ -151,6 +161,19 @@ export async function runPlan(plan: Plan, opts: RunPlanOptions): Promise<RunResu
   const steps = flattenSteps(plan);
   const transcript: TranscriptEntry[] = [];
   let verdict: "PASS" | "FAIL" | null = null;
+  let callsActual = 0;
+
+  // instruction はボスの発言として transcript の先頭に一度だけ入れる。
+  // 全員から見て「他人の発言」（role: "user"）になる。API 呼び出しは発生しない
+  // ので callsActual には数えない。
+  if (plan.instruction && plan.instruction.trim().length > 0) {
+    transcript.push({
+      participantId: BOSS_PARTICIPANT_ID,
+      role: BOSS_ROLE,
+      label: BOSS_LABEL,
+      text: plan.instruction,
+    });
+  }
 
   for (const step of steps) {
     const systemPrompt = buildSystemPrompt(plan, step.role);
@@ -164,6 +187,7 @@ export async function runPlan(plan: Plan, opts: RunPlanOptions): Promise<RunResu
       text,
     };
     transcript.push(entry);
+    callsActual++;
     opts.onEntry?.(entry);
 
     if (step.role === CHECK_ROLE) {
@@ -181,7 +205,7 @@ export async function runPlan(plan: Plan, opts: RunPlanOptions): Promise<RunResu
   return {
     transcript,
     callsPlanned: callsPlanned(plan),
-    callsActual: transcript.length,
+    callsActual,
     verdict,
   };
 }
@@ -196,10 +220,13 @@ export interface ValidationError {
   message: string;
 }
 
-/** /run のバリデーション。criteria が空なら 400。 */
+/** /run のバリデーション。criteria / instruction が空なら 400。 */
 export function validatePlan(plan: Plan): ValidationError | null {
   if (!plan.criteria || plan.criteria.trim().length === 0) {
     return { status: 400, message: "criteria must not be empty" };
+  }
+  if (!plan.instruction || plan.instruction.trim().length === 0) {
+    return { status: 400, message: "instruction must not be empty" };
   }
   if (!Array.isArray(plan.loop) || plan.loop.length === 0) {
     return { status: 400, message: "loop must have at least one step" };
