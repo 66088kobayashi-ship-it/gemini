@@ -4,8 +4,8 @@
 // supabaseAnonKey は「anon / public」キー（公開して問題ない）。
 // service_role キーは絶対にここに書かないこと（Edge Function の Secret にのみ置く）。
 window.YUI_CONFIG = {
-  supabaseUrl: "https://YOUR-PROJECT-REF.supabase.co",
-  supabaseAnonKey: "YOUR-ANON-KEY",
+  supabaseUrl: "https://rkhljqhrlvcmbhhmykvq.supabase.co/rest/v1/",
+  supabaseAnonKey: "sb_publishable_NqWIHzQsgEk31Uq_X6LaCA_e83jUbCP",
 
   // 無料枠の間の既定モデル。役の色・アイコンは役（propose/critic/...）に
   // 紐付いているので、ここを差し替えても輪の見た目は壊れない。
