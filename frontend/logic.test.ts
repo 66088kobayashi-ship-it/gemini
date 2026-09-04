@@ -1,0 +1,189 @@
+import { assert, assertEquals } from "../supabase/functions/_shared/test_util.ts";
+import {
+  applyModelConfig,
+  buildRunBody,
+  canSubmit,
+  groupByLap,
+  interpretRunResponse,
+  mapErrorMessage,
+} from "./logic.js";
+
+// ---------------------------------------------------------------------------
+// buildRunBody: before/after を常に含める
+// ---------------------------------------------------------------------------
+
+Deno.test("buildRunBody: before/after が空でも配列として含まれる", () => {
+  const plan = { before: [], loop: [{ role: "propose", model: "m1" }], after: [], rounds: 3 };
+  const body = buildRunBody(plan, "条件");
+  assertEquals(Array.isArray(body.plan.before), true);
+  assertEquals(Array.isArray(body.plan.after), true);
+  assertEquals(body.plan.before, []);
+  assertEquals(body.plan.after, []);
+});
+
+Deno.test("buildRunBody: before/after未指定でも配列として含まれる（省略しない）", () => {
+  const plan = { loop: [{ role: "propose", model: "m1" }], rounds: 1 };
+  const body = buildRunBody(plan, "条件");
+  assert("before" in body.plan);
+  assert("after" in body.plan);
+  assertEquals(body.plan.before, []);
+  assertEquals(body.plan.after, []);
+});
+
+Deno.test("buildRunBody: loopはrole/modelだけを送る", () => {
+  const plan = {
+    before: [],
+    loop: [{ role: "propose", model: "openrouter/free-a", extraneous: "捨てられるべき" }],
+    after: [],
+    rounds: 2,
+  };
+  const body = buildRunBody(plan, "条件");
+  assertEquals(body.plan.loop, [{ role: "propose", model: "openrouter/free-a" }]);
+  assertEquals(body.plan.criteria, "条件");
+  assertEquals(body.plan.rounds, 2);
+});
+
+// ---------------------------------------------------------------------------
+// canSubmit
+// ---------------------------------------------------------------------------
+
+Deno.test("canSubmit: loopが2未満なら送信不可", () => {
+  const r = canSubmit({ loopLength: 1, criteria: "x", callsNeeded: 3, quotaRemaining: 10 });
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "loop_too_short");
+});
+
+Deno.test("canSubmit: criteriaが空なら送信不可", () => {
+  const r = canSubmit({ loopLength: 3, criteria: "   ", callsNeeded: 3, quotaRemaining: 10 });
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "empty_criteria");
+});
+
+Deno.test("canSubmit: 残量不足なら送信不可", () => {
+  const r = canSubmit({ loopLength: 3, criteria: "x", callsNeeded: 20, quotaRemaining: 10 });
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "quota");
+});
+
+Deno.test("canSubmit: 条件を満たせば送信可", () => {
+  const r = canSubmit({ loopLength: 3, criteria: "x", callsNeeded: 9, quotaRemaining: 10 });
+  assertEquals(r.ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// エラー文言: 401/403/400/409/402/207 がそれぞれ別の文言
+// ---------------------------------------------------------------------------
+
+Deno.test("エラー文言: 401/403/400/409/402/207 はすべて異なる文言になる", () => {
+  const messages = new Set<string>();
+  messages.add(mapErrorMessage(401, {}));
+  messages.add(mapErrorMessage(403, {}));
+  messages.add(mapErrorMessage(400, {}));
+  messages.add(mapErrorMessage(409, { needed: 9, remaining: 3 }));
+  messages.add(mapErrorMessage(402, {}));
+  const partial = interpretRunResponse(207, {
+    transcript: [],
+    verdict: null,
+    callsActual: 1,
+    callsPlanned: 1,
+    warning: "記録に失敗した",
+  });
+  assert(partial.kind === "partial");
+  if (partial.kind === "partial") messages.add(partial.warning);
+  assertEquals(messages.size, 6, `重複がある: ${JSON.stringify([...messages])}`);
+});
+
+Deno.test("エラー文言: 409は残り回数と不足回数を含む（既存文言と同じ形）", () => {
+  const msg = mapErrorMessage(409, { needed: 9, remaining: 3 });
+  assert(msg.includes("9"));
+  assert(msg.includes("3"));
+  assert(msg.includes("6")); // 9-3
+});
+
+Deno.test("エラー文言: 401はログインへ戻すフラグが立つ", () => {
+  const r = interpretRunResponse(401, { error: "unauthorized" });
+  assert(r.kind === "error");
+  if (r.kind === "error") {
+    assertEquals(r.redirectToLogin, true);
+  }
+});
+
+Deno.test("エラー文言: 403/400/409/402はログインへ戻さない", () => {
+  for (const status of [403, 400, 409, 402]) {
+    const r = interpretRunResponse(status, {});
+    assert(r.kind === "error");
+    if (r.kind === "error") {
+      assertEquals(r.redirectToLogin, false);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 207: 結果を表示しつつ記録失敗も表示する
+// ---------------------------------------------------------------------------
+
+Deno.test("207: transcriptとwarningの両方を返す（記録失敗を握りつぶさない）", () => {
+  const body = {
+    transcript: [{ participantId: "loop:0", role: "propose", label: "提案", text: "初稿" }],
+    verdict: "PASS",
+    callsActual: 3,
+    callsPlanned: 6,
+    warning: "使用量の記録に失敗した",
+  };
+  const r = interpretRunResponse(207, body);
+  assertEquals(r.kind, "partial");
+  if (r.kind === "partial") {
+    assertEquals(r.transcript.length, 1);
+    assertEquals(r.warning, "使用量の記録に失敗した");
+  }
+});
+
+Deno.test("207は200と同じkindにならない", () => {
+  const bodyOk = { transcript: [], verdict: null, callsActual: 1, callsPlanned: 1 };
+  const r200 = interpretRunResponse(200, bodyOk);
+  const r207 = interpretRunResponse(207, { ...bodyOk, warning: "記録失敗" });
+  assertEquals(r200.kind, "success");
+  assertEquals(r207.kind, "partial");
+  assert(r200.kind !== r207.kind);
+});
+
+// ---------------------------------------------------------------------------
+// display と model の分離
+// ---------------------------------------------------------------------------
+
+Deno.test("applyModelConfig: 上書きが無ければdefaultsのmodel/displayを使う", () => {
+  const defaults = { propose: { model: "free/a", display: "モデルA(無料)" } };
+  const merged = applyModelConfig(defaults, undefined);
+  assertEquals(merged.propose, { model: "free/a", display: "モデルA(無料)" });
+});
+
+Deno.test("applyModelConfig: 上書きはmodel/displayを両方ペアで差し替える", () => {
+  const defaults = { propose: { model: "free/a", display: "モデルA(無料)" } };
+  const overrides = { propose: { model: "paid/b", display: "モデルB(有料)" } };
+  const merged = applyModelConfig(defaults, overrides);
+  assertEquals(merged.propose.model, "paid/b");
+  assertEquals(merged.propose.display, "モデルB(有料)");
+});
+
+Deno.test("applyModelConfig: modelだけ変えてdisplayを書き忘れても、古いdisplayが残らない", () => {
+  const defaults = { propose: { model: "free/a", display: "モデルA(無料)" } };
+  // display を書き忘れた上書き設定
+  const overrides = { propose: { model: "paid/b" } };
+  const merged = applyModelConfig(defaults, overrides);
+  assertEquals(merged.propose.model, "paid/b");
+  assert(
+    merged.propose.display !== defaults.propose.display,
+    "modelを変えたのにdisplayが古いdefaultのまま残っている",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// groupByLap
+// ---------------------------------------------------------------------------
+
+Deno.test("groupByLap: loop長ごとに周回を区切る", () => {
+  const transcript = Array.from({ length: 6 }, (_, i) => ({ text: `t${i}` }));
+  const laps = groupByLap(transcript, 2);
+  assertEquals(laps.length, 3);
+  assertEquals(laps[0].length, 2);
+});

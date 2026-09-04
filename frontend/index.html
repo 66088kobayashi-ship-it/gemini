@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>結 — AIをつなぐ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Shippori+Mincho:wght@600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --vat:#0E1930; --cloth:#1A2946; --cloth-hi:#26395E; --room:#141F3A;
+  --paper:#D3DAE8; --muted:#8593AE; --sumi:#0A1122;
+  --suou:#DC8698; --asagi:#6FBEDC; --yamabuki:#E3AE3C;
+  --wakakusa:#86D69C; --fuji:#B0A4EC;
+  --s1:8px; --s2:16px; --s3:24px; --s4:32px;
+  --tap:48px; --r:14px; --ease:cubic-bezier(.2,.7,.3,1);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0;overflow:hidden}
+body{background:radial-gradient(120% 80% at 50% 12%,#16244170 0%,transparent 70%),var(--vat);
+  color:var(--paper);font-family:"Noto Sans JP",system-ui,-apple-system,sans-serif;
+  font-size:15px;line-height:1.7;overscroll-behavior:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+:focus-visible{outline:2px solid var(--paper);outline-offset:4px;border-radius:6px}
+
+.stage{position:fixed;inset:0}
+.view{position:absolute;inset:0;transition:transform .42s var(--ease),opacity .3s var(--ease)}
+#room{transform:translateX(100%);opacity:0;pointer-events:none}
+body[data-screen="room"] #loom{transform:translateX(-16%) scale(.96);opacity:0;pointer-events:none}
+body[data-screen="room"] #room{transform:translateX(0);opacity:1;pointer-events:auto}
+
+/* 未ログイン時のゲート画面。#room と同じ考え方（transform/opacity/pointer-events
+   だけの追加）で、色・フォント・角丸は一切足していない。 */
+#gate{transform:translateX(-100%);opacity:0;pointer-events:none}
+body[data-screen="gate"] #gate{transform:translateX(0);opacity:1;pointer-events:auto}
+body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;pointer-events:none}
+
+.bar{position:absolute;top:0;left:0;right:0;height:60px;z-index:40;
+  display:flex;align-items:center;gap:var(--s2);padding:0 var(--s3);
+  padding-top:env(safe-area-inset-top);background:linear-gradient(var(--vat) 58%,transparent)}
+.mark{font-family:"Shippori Mincho",serif;font-weight:600;font-size:22px;letter-spacing:.16em}
+.gauge{margin-left:auto;display:flex;align-items:baseline;gap:6px}
+.gauge b{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+.gauge span{font-size:12px;color:var(--muted)}
+
+#canvas{position:absolute;inset:0;touch-action:none}
+#threads{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+
+.node{position:absolute;transform:translate(-50%,-50%);width:118px;
+  display:flex;flex-direction:column;align-items:center;gap:9px;touch-action:none;
+  transition:left .34s var(--ease),top .34s var(--ease)}
+.tile{width:100px;height:100px;border-radius:30px;display:grid;place-items:center;
+  background:radial-gradient(120% 100% at 30% 20%,color-mix(in srgb,var(--c) 26%,transparent),transparent 62%),var(--cloth);
+  border:1.5px solid color-mix(in srgb,var(--c) 42%,var(--cloth-hi));
+  box-shadow:0 10px 24px rgba(0,0,0,.5);transform-origin:50% 85%;
+  transition:box-shadow .22s var(--ease),border-color .22s var(--ease)}
+.tile svg{width:46px;height:46px;stroke:var(--c);fill:none;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;transition:filter .22s var(--ease)}
+.node .cap{font-size:14px;font-weight:500;line-height:1.2}
+.node .md{font-size:10px;color:var(--muted);text-align:center;margin-top:-5px}
+.node .seat{position:absolute;top:-6px;left:6px;
+  width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  background:var(--c);color:var(--sumi);font-size:12px;font-weight:700;
+  box-shadow:0 0 12px color-mix(in srgb,var(--c) 70%,transparent)}
+
+@keyframes jelly{
+  0%{transform:scale(1,1) translateY(0)}
+  22%{transform:scale(1.16,.84) translateY(2px)}
+  42%{transform:scale(.90,1.14) translateY(-12px)}
+  60%{transform:scale(1.07,.95) translateY(-4px)}
+  78%{transform:scale(.97,1.03) translateY(-8px)}
+  100%{transform:scale(1,1) translateY(-6px)}
+}
+.node[data-pop="1"] .tile{animation:jelly .58s var(--ease) both}
+.node[data-lit="1"] .tile{border-color:var(--c);
+  box-shadow:0 0 0 2px var(--c),
+    0 0 22px 2px color-mix(in srgb,var(--c) 60%,transparent),
+    0 0 52px 8px color-mix(in srgb,var(--c) 28%,transparent),
+    0 20px 34px rgba(0,0,0,.55)}
+.node[data-lit="1"] .tile svg{filter:drop-shadow(0 0 8px var(--c))}
+
+/* 長押しで出る削除 */
+.zap{position:absolute;left:50%;top:-30px;transform:translateX(-50%) scale(.4);
+  opacity:0;pointer-events:none;
+  min-height:var(--tap);padding:0 18px;border-radius:999px;
+  display:flex;align-items:center;gap:7px;white-space:nowrap;
+  background:var(--cloth);border:1.5px solid var(--c);color:var(--paper);
+  font-size:14px;font-weight:500;
+  box-shadow:0 0 18px color-mix(in srgb,var(--c) 50%,transparent),0 12px 26px rgba(0,0,0,.55);
+  transform-origin:50% 130%;transition:opacity .16s var(--ease)}
+.node[data-menu="1"] .zap{opacity:1;pointer-events:auto;
+  animation:bounceIn .42s var(--ease) both}
+@keyframes bounceIn{
+  0%{transform:translateX(-50%) scale(.4) translateY(10px)}
+  55%{transform:translateX(-50%) scale(1.12) translateY(-4px)}
+  78%{transform:translateX(-50%) scale(.96)}
+  100%{transform:translateX(-50%) scale(1)}
+}
+.zap svg{width:17px;height:17px;stroke:var(--c);fill:none;stroke-width:2;stroke-linecap:round}
+.node[data-menu="1"] .tile{border-color:var(--c);
+  box-shadow:0 0 0 2px var(--c),0 0 24px 3px color-mix(in srgb,var(--c) 55%,transparent),0 20px 34px rgba(0,0,0,.55)}
+@keyframes vanish{to{opacity:0;transform:translate(-50%,-50%) scale(.5)}}
+.node[data-gone="1"]{animation:vanish .28s var(--ease) both;pointer-events:none}
+
+.dock{position:absolute;left:0;right:0;bottom:0;z-index:30;
+  padding:var(--s2) var(--s3) calc(var(--s2) + env(safe-area-inset-bottom));
+  background:linear-gradient(transparent,var(--vat) 40%)}
+.tray{display:flex;gap:var(--s1);margin-bottom:var(--s2);flex-wrap:wrap}
+.tray button{min-height:var(--tap);padding:0 13px;border:1px solid var(--cloth-hi);
+  border-radius:999px;background:var(--cloth);display:flex;align-items:center;gap:7px;font-size:14px;
+  transition:box-shadow .2s var(--ease),border-color .2s var(--ease),transform .12s var(--ease)}
+.tray button:active{border-color:var(--c);transform:scale(.95);
+  box-shadow:0 0 0 1px var(--c),0 0 16px color-mix(in srgb,var(--c) 55%,transparent)}
+.tray button:disabled{opacity:.32}
+.tray .sw{width:10px;height:10px;border-radius:3px;background:var(--c);box-shadow:0 0 9px var(--c)}
+
+.criteria{display:block;width:100%;background:var(--cloth);color:var(--paper);
+  border:1px solid var(--cloth-hi);border-radius:var(--r);padding:12px 14px;
+  font:inherit;font-size:15px;min-height:var(--tap);resize:none;margin-bottom:var(--s1)}
+.criteria::placeholder{color:var(--muted)}
+.criteria:focus{border-color:var(--paper);outline:none}
+
+.runrow{display:flex;align-items:center;gap:var(--s2)}
+.verdict{flex:1;font-size:13px;color:var(--muted);line-height:1.5}
+.verdict[data-bad="1"]{color:var(--yamabuki)}
+.run{min-height:var(--tap);min-width:124px;padding:0 22px;border-radius:999px;
+  color:var(--sumi);font-weight:700;font-size:16px;
+  background:linear-gradient(100deg,var(--g1,#6FBEDC),var(--g2,#DC8698));
+  box-shadow:0 6px 20px color-mix(in srgb,var(--g1,#6FBEDC) 34%,transparent)}
+.run:disabled{opacity:.3;box-shadow:none;cursor:not-allowed}
+.run:not(:disabled):active{transform:scale(.96)}
+
+#room{background:var(--room);display:flex;flex-direction:column}
+.rhead{flex:none;display:flex;align-items:center;gap:12px;padding:0 var(--s2);
+  padding-top:env(safe-area-inset-top);height:64px;
+  background:var(--cloth);border-bottom:1px solid var(--cloth-hi)}
+.back{min-width:var(--tap);min-height:var(--tap);display:grid;place-items:center;font-size:26px}
+.rtitle{font-weight:500;font-size:16px}
+.rsub{font-size:11px;color:var(--muted)}
+.faces{margin-left:auto;display:flex}
+.av{width:32px;height:32px;border-radius:11px;flex:none;display:grid;place-items:center;
+  background:color-mix(in srgb,var(--c) 20%,var(--cloth));
+  border:1px solid color-mix(in srgb,var(--c) 46%,transparent)}
+.av svg{width:19px;height:19px;stroke:var(--c);fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.faces .av{margin-left:-9px;border:2px solid var(--cloth)}
+
+.rounds{flex:none;display:flex;align-items:center;gap:10px;
+  padding:10px var(--s2);border-bottom:1px solid var(--cloth-hi)}
+.rounds .lb{font-size:13px;color:var(--muted)}
+.step{display:flex;align-items:center;gap:2px;background:var(--room);
+  border:1px solid var(--cloth-hi);border-radius:999px;padding:2px}
+.step button{width:40px;height:40px;border-radius:50%;font-size:20px;display:grid;place-items:center}
+.step button:active{background:var(--cloth-hi)}
+.step button:disabled{opacity:.28}
+.step b{min-width:34px;text-align:center;font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
+.rounds .cost{margin-left:auto;font-size:12px;color:var(--muted);text-align:right;line-height:1.4}
+
+.log{flex:1;overflow-y:auto;padding:var(--s3) var(--s2) var(--s2);
+  -webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:14px}
+.pin{align-self:stretch;background:color-mix(in srgb,var(--yamabuki) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--yamabuki) 34%,transparent);
+  border-radius:12px;padding:10px 14px;font-size:13px}
+.pin b{color:var(--yamabuki);font-weight:700;margin-right:6px}
+.lap{align-self:center;font-size:11px;color:var(--muted);
+  border:1px solid var(--cloth-hi);border-radius:999px;padding:3px 12px}
+
+.msg{display:flex;gap:10px;align-items:flex-end;max-width:78%}
+.msg .who{font-size:11px;color:var(--muted);margin:0 0 4px 2px}
+.bub{background:var(--cloth);border-radius:4px 16px 16px 16px;padding:11px 15px;max-width:60ch}
+.bub p{margin:0}
+.msg.me{align-self:flex-end;flex-direction:row-reverse}
+.msg.me .bub{background:#3A5AA0;color:#EAF0FA;border-radius:16px 4px 16px 16px}
+.msg.in{animation:rise .34s var(--ease) both}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.typing{display:flex;gap:5px;padding:14px 16px}
+.typing i{width:7px;height:7px;border-radius:50%;background:var(--muted);animation:blink 1.1s infinite}
+.typing i:nth-child(2){animation-delay:.18s}
+.typing i:nth-child(3){animation-delay:.36s}
+@keyframes blink{0%,60%,100%{opacity:.25}30%{opacity:1}}
+.pass{color:var(--yamabuki);font-weight:700}
+
+.inbar{flex:none;display:flex;gap:10px;align-items:flex-end;
+  padding:10px var(--s2) calc(10px + env(safe-area-inset-bottom));
+  background:var(--cloth);border-top:1px solid var(--cloth-hi)}
+.inbar textarea{flex:1;background:var(--room);color:var(--paper);
+  border:1px solid var(--cloth-hi);border-radius:20px;padding:12px 16px;
+  font:inherit;font-size:15px;resize:none;min-height:var(--tap);max-height:120px;line-height:1.5}
+.inbar textarea:focus{border-color:var(--paper);outline:none}
+.inbar textarea::placeholder{color:var(--muted)}
+.send{min-width:var(--tap);min-height:var(--tap);border-radius:50%;color:var(--sumi);
+  background:linear-gradient(140deg,var(--g1,#6FBEDC),var(--g2,#DC8698));
+  display:grid;place-items:center;flex:none}
+.send:disabled{opacity:.28}
+.send svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}
+.empty{color:var(--muted);font-size:13px;text-align:center;padding:var(--s4) var(--s3);max-width:34ch;align-self:center}
+
+@media (prefers-reduced-motion:reduce){*{transition-duration:.01ms !important;animation:none !important}}
+</style>
+</head>
+<body data-screen="gate">
+
+<svg style="display:none">
+  <symbol id="i-propose" viewBox="0 0 24 24"><path d="M5 20c5.5-3.5 5.5-12.5 0-16"/><path d="M19 20c-5.5-3.5-5.5-12.5 0-16"/><circle cx="12" cy="12" r="2.6"/></symbol>
+  <symbol id="i-critic" viewBox="0 0 24 24"><path d="M12 21.5V14"/><path d="M12 13.5 4.5 4.5"/><path d="m12 13.5 7.5-9"/><circle cx="12" cy="13" r="2.2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M8.4 12.3l2.6 2.6 4.6-5.2"/></symbol>
+  <symbol id="i-research" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/><path d="M7.5 10.5h6"/></symbol>
+  <symbol id="i-digest" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 11h11"/><path d="M4 16h7"/><circle cx="18.5" cy="16" r="2.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 12.5h9L17.5 7"/></symbol>
+</svg>
+
+<div class="stage">
+
+  <section class="view" id="gate" aria-label="ログイン">
+    <div class="bar"><div class="mark">結</div></div>
+    <div class="dock">
+      <input class="criteria" id="gateEmail" type="email" placeholder="メールアドレス" autocomplete="email" inputmode="email">
+      <div class="runrow">
+        <div class="verdict" id="gateVerdict">メールアドレスを送ると、ログイン用のリンクが届く</div>
+        <button class="run" id="gateSend">送る</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="loom">
+    <div class="bar">
+      <div class="mark">結</div>
+      <div class="gauge"><b id="left">50</b><span id="limitLabel">／50 本日ぶん</span></div>
+      <button class="back" id="logout" aria-label="ログアウト">⏻</button>
+    </div>
+
+    <div id="canvas">
+      <svg id="threads" aria-hidden="true">
+        <defs><filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="b"/></feMerge>
+        </filter></defs>
+        <g id="gdefs"></g><g id="glinks"></g>
+      </svg>
+    </div>
+
+    <div class="dock">
+      <div class="tray" id="tray"></div>
+      <textarea class="criteria" id="criteria" rows="2"
+        placeholder="満たすべき条件を書く。例：根拠のない主張を残さない／800字以内"></textarea>
+      <div class="runrow">
+        <div class="verdict" id="verdict"></div>
+        <button class="run" id="open">開始</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="room" aria-label="会話室">
+    <div class="rhead">
+      <button class="back" id="back" aria-label="輪に戻る">‹</button>
+      <div><div class="rtitle" id="rtitle">会話室</div><div class="rsub" id="rsub"></div></div>
+      <div class="faces" id="faces"></div>
+    </div>
+    <div class="rounds">
+      <span class="lb">周回</span>
+      <div class="step">
+        <button id="minus" aria-label="減らす">−</button>
+        <b id="rnum">3</b>
+        <button id="plus" aria-label="増やす">+</button>
+      </div>
+      <div class="cost" id="cost"></div>
+    </div>
+    <div class="log" id="log"></div>
+    <div class="inbar">
+      <textarea id="prompt" rows="1" placeholder="指示を書いて Enter"></textarea>
+      <button class="send" id="send" aria-label="送る" disabled>
+        <svg viewBox="0 0 24 24"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+      </button>
+    </div>
+  </section>
+
+</div>
+
+<script src="./config.js"></script>
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  applyModelConfig,
+  buildRunBody,
+  canSubmit,
+  groupByLap,
+  interpretRunResponse,
+  mapErrorMessage,
+} from "./logic.js";
+
+// ---------------------------------------------------------------------------
+// 役の色・アイコンは役に紐付く（変わらない）。model/display はモデルに紐付き、
+// config.js から差し替えられる。無料枠の間は display に実際のモデル名を入れる
+// ことで、表示が嘘にならないようにする。
+// ---------------------------------------------------------------------------
+const DEFAULT_MODEL_CONFIG = {
+  propose:  { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
+  critic:   { model: "google/gemini-2.0-flash-exp:free",       display: "Gemini 2.0 Flash Exp（無料枠）" },
+  check:    { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
+  research: { model: "google/gemini-2.0-flash-exp:free",       display: "Gemini 2.0 Flash Exp（無料枠）" },
+  digest:   { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
+};
+const MODEL_CONFIG = applyModelConfig(DEFAULT_MODEL_CONFIG, window.YUI_CONFIG?.models);
+
+const ROLES={
+  propose :{label:'提案',hex:'#DC8698', icon:'i-propose'},
+  critic  :{label:'批判',hex:'#6FBEDC', icon:'i-critic'},
+  check   :{label:'検収',hex:'#E3AE3C', icon:'i-check'},
+  research:{label:'調査',hex:'#86D69C', icon:'i-research'},
+  digest  :{label:'要約',hex:'#B0A4EC', icon:'i-digest'},
+};
+for(const k of Object.keys(ROLES)){
+  ROLES[k].model = MODEL_CONFIG[k].model;
+  ROLES[k].display = MODEL_CONFIG[k].display;
+}
+
+const MAXN=5, NS='http://www.w3.org/2000/svg';
+
+/* 3区間で保持する。v1では before/after は常に空だが、
+   構造を減らさないことで次の版が書き直しにならない */
+const plan={ before:[], loop:[], after:[], rounds:3 };
+
+let QUOTA=50, used=0, busy=false, seq=0, menuOn=null;
+const $=id=>document.getElementById(id);
+const canvas=$('canvas'), gdefs=$('gdefs'), glinks=$('glinks'),
+      verdict=$('verdict'), critEl=$('criteria'), logEl=$('log'),
+      promptEl=$('prompt'), sendBtn=$('send'), openBtn=$('open');
+
+const avatar=r=>`<span class="av" style="--c:${r.hex}"><svg><use href="#${r.icon}"/></svg></span>`;
+const calls=()=>plan.before.length+plan.loop.length*plan.rounds+plan.after.length;
+const escapeHtml=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ---- 円に並べる。輪は自動で閉じる ---- */
+function layout(){
+  const w=canvas.clientWidth,h=canvas.clientHeight,n=plan.loop.length;
+  const cy=Math.max(230,h*.38);
+  const R=Math.min(158,w*.33,h*.20);
+  plan.loop.forEach((m,i)=>{
+    if(n===1){m.x=w/2;m.y=cy;}
+    else if(n===2){const g=Math.min(210,w*.46);m.x=w/2+(i?g/2:-g/2);m.y=cy;}
+    else{const a=-Math.PI/2+i*2*Math.PI/n;m.x=w/2+R*Math.cos(a);m.y=cy+R*Math.sin(a);}
+    m.el.style.left=m.x+'px';m.el.style.top=m.y+'px';
+    m.el.querySelector('.seat').textContent=i+1;
+  });
+  draw();
+}
+
+/* ---- 糸：隣へ、外へふくらむ ---- */
+function arc(a,b){
+  const mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
+  const dx=b.x-a.x,dy=b.y-a.y,len=Math.hypot(dx,dy)||1;
+  const k=Math.min(34,len*.16);
+  return `M ${a.x} ${a.y} Q ${mx+(dy/len)*k} ${my-(dx/len)*k} ${b.x} ${b.y}`;
+}
+function draw(){
+  gdefs.innerHTML='';glinks.innerHTML='';
+  const L=plan.loop, n=L.length;
+  if(n<2){paintButtons();return;}
+  for(let i=0;i<n;i++){
+    const a=L[i], b=L[(i+1)%n];
+    if(n===2&&i===1){} // 2人なら往路と復路で外側にふくらむ2本
+    const lg=document.createElementNS(NS,'linearGradient');
+    lg.setAttribute('id','lg'+i);lg.setAttribute('gradientUnits','userSpaceOnUse');
+    lg.setAttribute('x1',a.x);lg.setAttribute('y1',a.y);
+    lg.setAttribute('x2',b.x);lg.setAttribute('y2',b.y);
+    for(const [o,c] of [[0,ROLES[a.kind].hex],[1,ROLES[b.kind].hex]]){
+      const s=document.createElementNS(NS,'stop');
+      s.setAttribute('offset',o);s.setAttribute('stop-color',c);lg.appendChild(s);
+    }
+    gdefs.appendChild(lg);
+    const d=arc(a,b);
+    for(const [wd,op,f] of [[12,'.30','url(#glow)'],[5,'1',null]]){
+      const p=document.createElementNS(NS,'path');
+      p.setAttribute('d',d);p.setAttribute('fill','none');
+      p.setAttribute('stroke',`url(#lg${i})`);p.setAttribute('stroke-width',wd);
+      p.setAttribute('stroke-linecap','round');p.setAttribute('opacity',op);
+      if(f)p.setAttribute('filter',f);
+      glinks.appendChild(p);
+    }
+  }
+  paintButtons();
+}
+function paintButtons(){
+  const cs=plan.loop.map(n=>ROLES[n.kind].hex);
+  const g1=cs[0]||'#6FBEDC', g2=cs[1]||cs[0]||'#DC8698';
+  for(const b of [openBtn,sendBtn]){b.style.setProperty('--g1',g1);b.style.setProperty('--g2',g2);}
+}
+
+/* ---- 置く ---- */
+function addNode(kind){
+  if(plan.loop.length>=MAXN) return;
+  const r=ROLES[kind],id=++seq;
+  const el=document.createElement('div');
+  el.className='node';el.style.setProperty('--c',r.hex);
+  el.innerHTML=
+    `<span class="seat"></span>`+
+    `<span class="tile"><svg viewBox="0 0 24 24"><use href="#${r.icon}"/></svg></span>`+
+    `<span class="cap">${r.label}</span><span class="md">${r.display}</span>`+
+    `<button class="zap" tabindex="-1"><svg viewBox="0 0 24 24"><use href="#i-trash"/></svg>外す</button>`;
+  const n={id,kind,el,x:0,y:0};
+  canvas.appendChild(el);plan.loop.push(n);bind(n);layout();refresh();pop(n);
+}
+function pop(n){
+  n.el.dataset.pop='0';
+  requestAnimationFrame(()=>{n.el.dataset.pop='1';setTimeout(()=>n.el.dataset.pop='0',600);});
+}
+function removeNode(n){
+  closeMenu();
+  n.el.dataset.gone='1';
+  setTimeout(()=>{
+    n.el.remove();
+    const i=plan.loop.indexOf(n);
+    if(i>-1) plan.loop.splice(i,1);
+    layout();refresh();
+  },280);
+}
+
+/* ---- 短く押す＝跳ねる／長押し＝外すが出る ---- */
+function bind(n){
+  let timer=null, long=false;
+  n.el.querySelector('.zap').addEventListener('pointerup',e=>{
+    e.stopPropagation(); removeNode(n);
+  });
+  n.el.addEventListener('pointerdown',e=>{
+    if(e.target.closest('.zap')) return;
+    e.preventDefault(); long=false; pop(n); navigator.vibrate?.(9);
+    timer=setTimeout(()=>{
+      long=true; openMenu(n); navigator.vibrate?.([12,40,18]);
+    },500);
+  });
+  n.el.addEventListener('pointerup',e=>{
+    if(e.target.closest('.zap')) return;
+    clearTimeout(timer);
+    if(!long && menuOn) closeMenu();
+  });
+  n.el.addEventListener('pointercancel',()=>clearTimeout(timer));
+}
+function openMenu(n){
+  closeMenu(); menuOn=n;
+  n.el.dataset.menu='1'; n.el.dataset.lit='1';
+  verdict.textContent='「外す」を押すと輪から抜ける';
+}
+function closeMenu(){
+  if(menuOn){delete menuOn.el.dataset.menu;menuOn.el.dataset.lit='0';}
+  menuOn=null; refresh();
+}
+canvas.addEventListener('pointerdown',e=>{
+  if(e.target===canvas||e.target.tagName==='svg') closeMenu();
+});
+
+/* ---- 残量：実行順の長さをそのまま数える ---- */
+function refresh(){
+  const leftN=QUOTA-used, need=calls();
+  $('left').textContent=leftN;
+  const check=canSubmit({loopLength:plan.loop.length, criteria:critEl.value, callsNeeded:need, quotaRemaining:leftN});
+  let msg;
+  if(check.reason==='loop_too_short') msg='役を2つ以上置くと輪になる';
+  else if(check.reason==='empty_criteria') msg='満たすべき条件を書くと、開始できる';
+  else if(check.reason==='quota') msg=`この輪は${need}回ぶん。残り${leftN}回では${need-leftN}回足りない`;
+  else msg=`${plan.loop.length}人 × ${plan.rounds}周 = ${need}回。残り${leftN}回`;
+  verdict.textContent=msg;
+  verdict.dataset.bad=(check.reason==='quota')?'1':'0';
+  openBtn.disabled=!check.ok;
+  $('rnum').textContent=plan.rounds;
+  $('minus').disabled=plan.rounds<=1; $('plus').disabled=plan.rounds>=10;
+  $('cost').innerHTML=`${need}回ぶん<br>残り${leftN}回`;
+  sendBtn.disabled=busy||!promptEl.value.trim()||need>leftN;
+  [...document.querySelectorAll('#tray button')].forEach(b=>b.disabled=plan.loop.length>=MAXN);
+}
+critEl.addEventListener('input',refresh);
+$('minus').onclick=()=>{plan.rounds=Math.max(1,plan.rounds-1);refresh();};
+$('plus').onclick =()=>{plan.rounds=Math.min(10,plan.rounds+1);refresh();};
+
+openBtn.onclick=()=>{
+  closeMenu();
+  $('rtitle').textContent=plan.loop.map(n=>ROLES[n.kind].label).join('→');
+  $('rsub').textContent=`${plan.loop.length}人の輪`;
+  $('faces').innerHTML=plan.loop.map(n=>avatar(ROLES[n.kind])).join('');
+  logEl.innerHTML=`<div class="pin"><b>条件</b>${escapeHtml(critEl.value.trim())}</div>`+
+    `<div class="empty">周回数を決めて、指示を書いて Enter</div>`;
+  document.body.dataset.screen='room';refresh();
+  setTimeout(()=>promptEl.focus(),460);
+  refreshQuota();
+};
+$('back').onclick=()=>{document.body.dataset.screen='loom';promptEl.blur();};
+
+promptEl.addEventListener('input',()=>{
+  promptEl.style.height='auto';
+  promptEl.style.height=Math.min(promptEl.scrollHeight,120)+'px';refresh();});
+promptEl.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();start();}});
+sendBtn.onclick=start;
+
+// ---------------------------------------------------------------------------
+// Supabase 認証（マジックリンクのみ）
+// ---------------------------------------------------------------------------
+const supabase = createClient(window.YUI_CONFIG.supabaseUrl, window.YUI_CONFIG.supabaseAnonKey);
+const FUNCTIONS_BASE = `${window.YUI_CONFIG.supabaseUrl}/functions/v1`;
+
+const gateEmail=$('gateEmail'), gateSend=$('gateSend'), gateVerdict=$('gateVerdict');
+let resendTimer=null;
+
+function setScreen(name){ document.body.dataset.screen=name; }
+
+function startResendCooldown(){
+  let remaining=60;
+  gateSend.disabled=true;
+  gateVerdict.textContent=`メールを送った。${remaining}秒後に再送できる`;
+  clearInterval(resendTimer);
+  resendTimer=setInterval(()=>{
+    remaining--;
+    if(remaining<=0){
+      clearInterval(resendTimer);
+      gateVerdict.textContent='メールが届かない場合は、もう一度送れる';
+      gateSend.disabled=false;
+      return;
+    }
+    gateVerdict.textContent=`メールを送った。${remaining}秒後に再送できる`;
+  },1000);
+}
+
+async function sendMagicLink(){
+  const email=gateEmail.value.trim();
+  if(!email){ gateVerdict.textContent='メールアドレスを入れてほしい'; return; }
+  gateSend.disabled=true;
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options:{ emailRedirectTo: window.location.origin + window.location.pathname },
+  });
+  if(error){
+    gateVerdict.textContent='送信できなかった。もう一度試す';
+    gateSend.disabled=false;
+    return;
+  }
+  startResendCooldown();
+}
+gateSend.onclick=sendMagicLink;
+
+async function handleUnauthorized(){
+  await supabase.auth.signOut();
+  setScreen('gate');
+}
+$('logout').onclick=async()=>{
+  await supabase.auth.signOut();
+  setScreen('gate');
+};
+
+async function refreshQuota(){
+  const { data:{ session } } = await supabase.auth.getSession();
+  if(!session) return;
+  try{
+    const res=await fetch(`${FUNCTIONS_BASE}/quota`,{
+      headers:{ Authorization:`Bearer ${session.access_token}` },
+    });
+    if(res.status===401){ await handleUnauthorized(); return; }
+    if(!res.ok) return;
+    const body=await res.json();
+    QUOTA=body.limit; used=body.used;
+    $('limitLabel').textContent=`／${QUOTA} 本日ぶん`;
+    refresh();
+  }catch(e){ /* 通信失敗時は前回値のまま表示を維持する */ }
+}
+
+async function enterApp(){
+  setScreen('loom');
+  await refreshQuota();
+}
+
+supabase.auth.onAuthStateChange((_event, session)=>{
+  if(session){ enterApp(); } else { setScreen('gate'); }
+});
+
+(async()=>{
+  const { data:{ session } } = await supabase.auth.getSession();
+  if(session){ await enterApp(); } else { setScreen('gate'); }
+})();
+
+// ---------------------------------------------------------------------------
+// /run を呼び、返ってきた発言を吹き出しへ積む
+// ---------------------------------------------------------------------------
+
+function renderTranscript(transcript){
+  const laps=groupByLap(transcript, plan.loop.length);
+  laps.forEach((lapEntries,lapIndex)=>{
+    const tag=document.createElement('div');
+    tag.className='lap'; tag.textContent=`${lapIndex+1}周目`;
+    logEl.appendChild(tag);
+    for(const entry of lapEntries){
+      const r=ROLES[entry.role] || {hex:'#8593AE',icon:'i-check',display:''};
+      const isPass=entry.text.trim().startsWith('PASS');
+      const body=isPass?`<span class="pass">${escapeHtml(entry.text)}</span>`:escapeHtml(entry.text);
+      const d=document.createElement('div'); d.className='msg in';
+      d.innerHTML=avatar(r)+`<div><div class="who">${escapeHtml(entry.label)} · ${escapeHtml(r.display||'')}</div>`+
+        `<div class="bub"><p>${body}</p></div></div>`;
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
+    }
+  });
+}
+
+function showRunError(message){
+  const box=document.createElement('div');
+  box.className='pin';
+  box.innerHTML=`<b>エラー</b>${escapeHtml(message)}`;
+  logEl.appendChild(box); logEl.scrollTop=logEl.scrollHeight;
+}
+
+async function start(){
+  const text=promptEl.value.trim();
+  const { data:{ session } } = await supabase.auth.getSession();
+  if(busy||!text||!session) return;
+  const check=canSubmit({loopLength:plan.loop.length, criteria:critEl.value, callsNeeded:calls(), quotaRemaining:QUOTA-used});
+  if(!check.ok) return;
+
+  busy=true;
+  promptEl.value='';promptEl.style.height='auto';
+  logEl.querySelector('.empty')?.remove();refresh();
+
+  const me=document.createElement('div');
+  me.className='msg me in';
+  me.innerHTML=`<div><div class="bub"><p>${escapeHtml(text)}</p></div></div>`;
+  logEl.appendChild(me);logEl.scrollTop=logEl.scrollHeight;
+
+  const typing=document.createElement('div');
+  typing.className='msg in';
+  typing.innerHTML=`<div><div class="bub typing"><i></i><i></i><i></i></div></div>`;
+  logEl.appendChild(typing);logEl.scrollTop=logEl.scrollHeight;
+
+  let res, body;
+  try{
+    const runBody=buildRunBody(
+      { before:plan.before, loop:plan.loop.map(n=>({role:n.kind,model:ROLES[n.kind].model})), after:plan.after, rounds:plan.rounds },
+      critEl.value.trim(),
+    );
+    res=await fetch(`${FUNCTIONS_BASE}/run`,{
+      method:'POST',
+      headers:{ 'content-type':'application/json', Authorization:`Bearer ${session.access_token}` },
+      body:JSON.stringify(runBody),
+    });
+    body=await res.json();
+  }catch(e){
+    typing.remove();
+    showRunError(mapErrorMessage(0,{}));
+    busy=false;refresh();promptEl.focus();
+    return;
+  }
+  typing.remove();
+
+  const outcome=interpretRunResponse(res.status, body);
+
+  if(outcome.kind==='error'){
+    showRunError(outcome.message);
+    if(outcome.redirectToLogin) await handleUnauthorized();
+    busy=false;refresh();promptEl.focus();
+    return;
+  }
+
+  renderTranscript(outcome.transcript);
+  if(outcome.kind==='partial'){
+    showRunError(outcome.warning);
+  }
+
+  used+=outcome.callsActual;
+  busy=false;refresh();promptEl.focus();
+  refreshQuota();
+}
+
+const tray=$('tray');
+for(const [k,r] of Object.entries(ROLES)){
+  const b=document.createElement('button');
+  b.style.setProperty('--c',r.hex);
+  b.innerHTML=`<span class="sw"></span>${r.label}`;
+  b.onclick=()=>addNode(k);
+  tray.appendChild(b);
+}
+addNode('propose');addNode('critic');addNode('check');
+refresh();
+window.addEventListener('resize',layout);
+</script>
+</body>
+</html>
