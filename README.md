@@ -79,9 +79,10 @@ supabase/
    確認する（無料プランは1時間あたりの送信数に制限があるため、実機確認で
    何度も送ると一時的に届かなくなることがある。届かない場合は少し待つ）。
 
-### 2. Edge Function の Secrets を登録する
+### 2. Edge Function の Secrets（設定するのは後述のチェックリストのC節）
 
-Supabase ダッシュボードの **Project Settings → Edge Functions → Secrets** で:
+Supabase ダッシュボードの **Project Settings → Edge Functions → Secrets** で
+設定する項目は以下。
 
 | Secret 名             | 内容                                                  |
 | ---------------------- | ----------------------------------------------------- |
@@ -90,6 +91,12 @@ Supabase ダッシュボードの **Project Settings → Edge Functions → Secr
 | `CONTEXT_WINDOW`       | （任意）文脈窓の直近ターン数。既定 12                 |
 
 `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` は Supabase が自動で注入する。
+
+**`OPENROUTER_API_KEY` は今すぐ設定しない。** allowlist の防御が実機で
+本当に効いていることを確認してから設定する（下のチェックリストC節、
+手順9・10・11が通った後）。理由はチェックリストのA節末尾に書いてある。
+`DAILY_QUOTA` / `CONTEXT_WINDOW` は課金に直結しないので、先に設定して
+構わない。
 
 キーは Edge Function の Secret にのみ置かれ、フロントのコード・ログ・
 レスポンスには一切出力されない。
@@ -154,64 +161,86 @@ Supabase ダッシュボードの **Authentication → URL Configuration** で:
 - **Redirect URLs**: 同じURLを追加登録する
   （末尾のスラッシュあり・なし両方を念のため登録しておくと安全）
 
-## デプロイ前チェックリスト
+## デプロイ・実機確認チェックリスト
 
-上から順に実行する。
+上から順に実行する。**キーを設定する前に防御を確認する** 順序になっている。
+anon key は `config.js` 経由でブラウザに公開される（設計通り。防御は
+`allowlist` と RLS が担っている）。したがって **`allowlist` が実際に
+効いていることを確認するまで、`OPENROUTER_API_KEY` を設定しない。**
+キーが未設定なら、仮に allowlist に穴があっても OpenRouter を叩けないので
+課金は発生しない。防御を確認してから弾を込める、という順序にしてある。
 
-- [ ] `supabase/migrations/0001_init.sql` を適用した
-- [ ] `allowlist` に自分のメールアドレスを1件入れた
-- [ ] マジックリンクの送信元メール設定を確認した（Authentication → Emails）
-- [ ] Edge Function の Secret に `OPENROUTER_API_KEY` を設定した
-- [ ] `quota` / `run` の Edge Function をデプロイした
-- [ ] https://openrouter.ai/models で、既定モデルID（`frontend/index.html`
+### A. デプロイ前（キーなし）
+
+- [ ] 1. `supabase/migrations/0001_init.sql` を適用した
+- [ ] 2. `allowlist` に自分のメールアドレスを1件登録した
+- [ ] 3. マジックリンクの送信元メール設定を確認した（Authentication → Emails）
+- [ ] 4. `quota` / `run` の Edge Function をデプロイした（`OPENROUTER_API_KEY`
+      の Secret はまだ設定しない）
+- [ ] 5. `frontend/config.js` に Project URL と anon key を設定した
+      （**service role key ではないことを確認した**）
+- [ ] 6. GitHub Pages を有効化した（root 公開、`/frontend/` で動く）
+- [ ] 7. マジックリンクのリダイレクトURL（Site URL / Redirect URLs）を登録した
+
+### B. 防御の確認（キーなし。ここまで課金は発生しない）
+
+- [ ] 8. ログインできるか（マジックリンクから戻ってセッションが乗るか）
+- [ ] 9. **allowlist に載っていない別アドレスで 403 になるか（最重要）**
+- [ ] 10. `criteria` 空で 400、API呼び出し 0 回になるか
+- [ ] 11. `instruction` 空で 400、API呼び出し 0 回になるか
+
+  上記のうち「呼び出し0回」（＝403/400の判定がOpenRouter呼び出しより前に
+  来ていること）は `http_handlers.test.ts` で自動テスト済み。実機では
+  キーが未設定であること自体がもう一段の防御になっている。
+
+  **確認方法**: キーが未設定の状態で 403 / 400 が正しく返ることが、
+  上記の判定順序が壊れていないことの実地証拠になる。**もし手順9で
+  403 ではなく 500（キーがないエラー）が返るなら、判定順序が壊れている
+  ので報告してほしい。**
+
+  **手順9が通らないうちは、絶対に手順12・13へ進まないこと。**
+
+### C. ここで初めてキーを込める
+
+- [ ] 12. https://openrouter.ai/models で、既定モデルID（`frontend/index.html`
       の `DEFAULT_MODEL_CONFIG`、`:free` 付き）が現存するか確認した。
       無料枠カタログは入れ替わるため、無くなっていたら
       `frontend/config.js` の `models` で存命のモデルに上書きする
-- [ ] `frontend/config.js` に実際の Supabase URL / anon key を入れた
-      （service role key ではないことを再確認した）
-- [ ] GitHub Pages を有効にした（Source: root）
-- [ ] Supabase の Site URL / Redirect URLs に GitHub Pages の公開URLを登録した
+- [ ] 13. Edge Function の Secret に `OPENROUTER_API_KEY` を設定した
+
+### D. 実行の確認（ここから消費が発生する）
+
+- [ ] 14. **最小実行** — 役を2つ（無料モデル）、1周だけで実行し、実際に
+      OpenRouterから応答が返ってくることを確認する
+- [ ] 15. **残量の反映** — 実行後に上部の残量表示が減っていること、
+      `/quota` を再取得した値と一致していることを確認する
+- [ ] 16. **3人×3周** — 発言者名（`[役名]`）が各発言の前に付いていることを、
+      返ってきた文面から確認する
+- [ ] 17. **5周以上を1回だけ回し、後半で出力が崩れないかを目視する**
+      （「既知の挙動」に書いた instruction の窓外脱落が実害を出すかどうかの
+      確認。後半のターンで、モデルが「何を作っているか」を見失った
+      ような応答（条件は満たそうとするが話題がずれる、等）が出たら、
+      その内容を報告してほしい。対処（system promptへの再掲）はそれを見てから決める）
+
+### E. 未実測として残るもの
+
+- [ ] 18. **`supabase start` のローカルPostgresに対し、同一ユーザーで
+      `/run` を同時に複数投げ、`usage.calls` が全実行ぶん正しく積算される
+      ことを1度だけ確認する。** サンドボックスでは実際の同時実行を
+      再現できないため、`record_run()` のアトミック性（`on conflict ...
+      do update set calls = usage.calls + excluded.calls` という単一SQL文
+      であること）は、現状「単一SQL文だから正しいはず」という推論に
+      留まっている。本番投入前に一度だけ実測で埋めること。
+      **これだけは iPad 単体では完結せず、Docker が動くPCが別途必要。**
+
+以下は自動テストで担保済み（実機確認としてはB節の再確認で足りる）:
+
 - [x] JWTなし/allowlist外/criteria空/instruction空/残量不足のいずれも
       `/run` が実際の呼び出しを1回もせずに拒否すること
       （`http_handlers.test.ts` で検証済み）
 - [x] クライアントが偽の消費回数を送っても、サーバー側の再計算が使われること
       （検証済み）
 - [x] 加算(`persistRun`)が失敗したとき、黙って200を返さないこと（検証済み）
-- [ ] **`supabase start` のローカルPostgresに対し、同一ユーザーで `/run` を
-      同時に複数投げ、`usage.calls` が全実行ぶん正しく積算されることを
-      1度だけ確認する。** サンドボックスでは実際の同時実行を再現できないため、
-      `record_run()` のアトミック性（`on conflict ... do update set
-      calls = usage.calls + excluded.calls` という単一SQL文であること）は、
-      現状「単一SQL文だから正しいはず」という推論に留まっている。
-      本番投入前に一度だけ実測で埋めること。
-      **これだけは iPad 単体では完結せず、Docker が動くPCが別途必要。**
-
-## 実機での動作確認手順
-
-課金や誤動作が起きにくい順に並べてある。上から順に進め、崩れたら
-そこで止めて確認する。
-
-1. **ログイン** — マジックリンクを受信し、リンクから戻ってきてセッションが
-   乗る（画面が `#gate` から輪の画面に切り替わる）ことを確認する
-2. **allowlist外での拒否** — `allowlist` に登録していない別のメール
-   アドレスでログインを試み、`/run` が 403 になることを確認する
-   （403の文言が表示され、APIは呼ばれない）
-3. **criteria空での拒否** — 条件欄を空のまま実行し、400になり
-   OpenRouterが呼ばれていないことを確認する（OpenRouter側の使用量画面等で
-   増えていないことも見る）
-4. **instruction空での拒否** — 条件は書くが指示欄を空のまま送信を試み、
-   400になりAPIが呼ばれないことを確認する
-5. **最小実行** — 役を2つ（無料モデル）、1周だけで実行し、実際に
-   OpenRouterから応答が返ってくることを確認する
-6. **残量の反映** — 実行後に上部の残量表示が減っていること、
-   `/quota` を再取得した値と一致していることを確認する
-7. **3人×3周** — 発言者名（`[役名]`）が各発言の前に付いていることを、
-   返ってきた文面から確認する
-8. **5周以上を1回だけ回し、後半で出力が崩れないかを目視する**
-   （「既知の挙動」に書いた instruction の窓外脱落が実害を出すかどうかの
-   確認。後半のターンで、モデルが「何を作っているか」を見失った
-   ような応答（条件は満たそうとするが話題がずれる、等）が出たら、
-   その内容を報告してほしい。対処（system promptへの再掲）はそれを見てから決める）
 
 ## ローカルでのテスト実行
 
