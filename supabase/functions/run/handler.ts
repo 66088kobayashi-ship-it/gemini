@@ -14,6 +14,7 @@
 
 import { corsPreflight, jsonResponse } from "../_shared/cors.ts";
 import {
+  GetRunByIdFn,
   GetUsedTodayFn,
   handleRun,
   IsAllowlistedFn,
@@ -23,6 +24,7 @@ import {
 import { CallModelFn } from "../_shared/engine.ts";
 import {
   createAdminClient,
+  makeGetRunById,
   makeGetUsedToday,
   makeIsAllowlisted,
   makePersistRun,
@@ -42,6 +44,7 @@ export interface RunDeps {
   isAllowlisted: IsAllowlistedFn;
   getUsedToday: GetUsedTodayFn;
   persistRun: PersistRunFn;
+  getRunById: GetRunByIdFn;
   /** 省略時は getEnv から OPENROUTER_API_KEY を遅延取得する実アダプタを使う。
    * テストではカウント用スタブに差し替える。 */
   callModel?: CallModelFn;
@@ -68,6 +71,7 @@ function buildDefaultDeps(): RunDeps {
     isAllowlisted: makeIsAllowlisted(admin),
     getUsedToday: makeGetUsedToday(admin),
     persistRun: makePersistRun(admin),
+    getRunById: makeGetRunById(admin),
   };
 }
 
@@ -94,6 +98,7 @@ export async function handleRunRequest(req: Request, deps?: RunDeps): Promise<Re
       isAllowlisted: d.isAllowlisted,
       getUsedToday: d.getUsedToday,
       persistRun: d.persistRun,
+      getRunById: d.getRunById,
       callModel: d.callModel ?? makeLazyCallModel(d.getEnv),
       dailyLimit,
       window,

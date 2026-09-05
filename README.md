@@ -26,6 +26,7 @@ supabase/
       openrouter.ts                # OpenRouterアダプタ（リトライ/402処理）
       openrouter.test.ts
       supabase_adapters.ts         # 上記を実SupabaseClientにつなぐ
+                                    # （再開用のmakeGetRunByIdを含む）
       supabase_adapters.test.ts
       cors.ts
       test_util.ts                 # 自前の最小アサーション（外部依存なし）
@@ -87,6 +88,14 @@ supabase/
 切り出し、DOM操作以外の呼び出し順序をテストする）が可能なはずだが、
 今は実施しない。** 実機確認を優先するため、ここでは将来の課題として
 記録するだけにとどめる。
+
+履歴一覧・詳細・再開の画面（`#history`/`#detail`、`loadHistory()`/
+`openDetail()`/`resumeBtn.onclick` 等）も同じ理由で自動テストの対象外。
+これらが呼ぶ純粋関数（`isResumable`/`endReasonLabel`/`buildResumeRequest`/
+`resumeCallsNeeded`/`canResume`）自体は `logic.test.ts` でテスト済みだが、
+それを呼ぶ `index.html` 側の配線（`supabase.from('runs').select(...)` の
+呼び出しや、続きから実行後に画面を更新する処理）はブラウザでしか検証
+できない。実機確認チェックリストに手順を追加して補う（下記D節）。
 
 ### モデルIDは静的サイトなので「環境変数」ではなく `config.js` で上書きする
 
@@ -333,6 +342,20 @@ anon key は `config.js` 経由でブラウザに公開される（設計通り�
       （「既知の挙動」に書いた instruction の窓外脱落が実害を出すかどうかの
       確認。**判定基準は下の「手順17の判定基準」を参照** — 崩れたかどうかは
       実行後の印象で決めず、そこに書いた条件だけで機械的に判定する）
+- [ ] 17.5. **履歴一覧・詳細・再開（実機のみで確認できる配線部分）**
+      - 手順16の実行後、反物画面から「履歴」を開き、直前の実行が一覧に
+        新しい順で出ること・日時/構成/周回数/終了理由/消費回数が表示
+        されることを確認する
+      - 一覧の行をタップし、詳細画面で保存済みの transcript が会話室と
+        同じ見た目で表示されることを確認する
+      - **周回上限で終わった実行**（検収役なし、または検収がPASSしない
+        まま周回を使い切った実行）を1件作り、その詳細に「続きから」の
+        導線が出ることを確認する
+      - **検収がPASSした実行**の詳細には「続きから」の導線が出ないことを
+        確認する
+      - 「続きから」で追加周回数を選び、実行前に消費回数と残量が表示
+        されること、実行後に続きの発言が追記され、残量表示が正しく
+        減ることを確認する
 
 ### E. 未実測として残るもの
 
@@ -478,3 +501,25 @@ deno test frontend/ supabase/functions/_shared/
   間は `display` に実際のモデル名を入れ、表示が嘘にならないようにする。
   役の色・アイコンは役に紐付いているので、モデルを差し替えても図は壊れない。
 - 既定モデルは無料枠（`:free`）。有料モデルを既定にはしていない。
+- **履歴と再開**: `runs` は本人の行のみ RLS で読める（`runs_select_own`
+  ポリシー）ので、履歴一覧・詳細は専用の Edge Function を作らず
+  `frontend/index.html` から `supabase.from('runs').select(...)` で直接
+  読む。書き込み（`record_run()`）と違って、読み取りは RLS だけで
+  安全に担保できるため、余計な仲介コードを増やさない。
+  再開できるのは**周回上限に達して終わった実行だけ**
+  （`engine.ts` の `isResumable(verdict)` は `verdict !== "PASS"` で判定。
+  検収が最後まで `FAIL` のままだった場合と、検収役が無い等で判定が
+  出ないまま周回を使い切った場合の両方を含む）。PASSで終わった実行は
+  条件を満たして終わっているので再開できない。この判定はクライアントの
+  ボタン表示だけでなく、必ず `http_handlers.ts` の `handleRun` 側でも
+  行う（他人の実行ID・存在しない実行IDは区別せず404、PASS済みへの
+  再開要求は400）。
+  再開時は `engine.ts` の `runPlan`/`executeRun` に新設した
+  `priorTranscript` を渡し、前回の transcript をそのまま引き継いで
+  続きの周回だけを回す。`instruction` は前回の transcript に既に
+  含まれているので再挿入しない。渡す `Plan` は `before`/`after` を
+  空にし、`loop` と `rounds`（追加する周回数）だけを持たせるので、
+  既存の消費回数の式 `callsPlanned()` がそのまま「追加周回数×人数」を
+  返す（新しい計算式を作っていない）。`buildMessages` は transcript の
+  出どころを問わない汎用実装なので、再開後も「配列の先頭は必ず他人の
+  発言」という不変条件は変更なしで成立する。

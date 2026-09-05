@@ -2,7 +2,7 @@
 // （それは index.ts の責務）。ここは依存をすべて引数で受け取るので、
 // 実サーバーを立てずに deno test だけで検証できる。
 
-import { CallModelFn, executeRun, Plan, PlanStep, RunResult, utcDay } from "./engine.ts";
+import { CallModelFn, executeRun, isResumable, Plan, PlanStep, RunResult, TranscriptEntry, utcDay } from "./engine.ts";
 
 export interface AuthContext {
   userId: string;
@@ -37,6 +37,20 @@ export interface PersistRunOutput {
  * これを1回のアトミックな呼び出し（record_run RPC）にすること。
  * read-then-write に分解しないこと。 */
 export type PersistRunFn = (input: PersistRunInput) => Promise<PersistRunOutput>;
+
+/** 「続きから」再開するときに読み出す、保存済みの実行1件分。
+ * plan は元の実行の plan をそのまま（criteria/instruction/loop を
+ * 再開後も使い回すため）、transcript は再開の起点として引き継ぐ。 */
+export interface StoredRun {
+  plan: Plan;
+  transcript: TranscriptEntry[];
+  verdict: "PASS" | "FAIL" | null;
+}
+
+/** userId と runId の両方が一致する行だけを返す。他人の実行IDを渡された
+ * 場合も、存在しない場合も、区別せず null を返すこと（実装側の責務）。
+ * 呼び出し元はどちらも 404 として扱う（実行IDの存在を外部に漏らさない）。 */
+export type GetRunByIdFn = (userId: string, runId: string) => Promise<StoredRun | null>;
 
 export interface HttpResult {
   status: number;
@@ -80,6 +94,7 @@ export interface HandleRunDeps {
   isAllowlisted: IsAllowlistedFn;
   getUsedToday: GetUsedTodayFn;
   persistRun: PersistRunFn;
+  getRunById: GetRunByIdFn;
   callModel: CallModelFn;
   dailyLimit: number;
   window?: number;
@@ -120,6 +135,37 @@ function coercePlan(rawBody: unknown): Plan | null {
   return { before, loop, after, rounds: p.rounds, criteria: p.criteria, instruction: p.instruction };
 }
 
+type RunRequest =
+  | { kind: "fresh"; plan: Plan }
+  | { kind: "resume"; runId: string; addedRounds: number };
+
+/** リクエストボディが「新規実行」(`plan`) と「再開」(`resume`) の
+ * どちらかを判定する。両方/どちらも無い場合は不正な入力として null を返す。
+ * 再開側も、クライアントが消費回数そのものを申告する余地は一切無い
+ * （addedRounds という「追加する周回数」だけを受け取り、消費回数は
+ * サーバー側で callsPlanned() から再計算する）。 */
+function coerceRunRequest(rawBody: unknown): RunRequest | null {
+  if (typeof rawBody !== "object" || rawBody === null) return null;
+  const body = rawBody as Record<string, unknown>;
+  const hasPlan = body.plan !== undefined && body.plan !== null;
+  const hasResume = body.resume !== undefined && body.resume !== null;
+  if (hasPlan === hasResume) return null; // 両方 or どちらも無いのは不正
+
+  if (hasResume) {
+    if (typeof body.resume !== "object") return null;
+    const r = body.resume as Record<string, unknown>;
+    if (typeof r.runId !== "string" || r.runId.trim().length === 0) return null;
+    if (typeof r.addedRounds !== "number" || !Number.isInteger(r.addedRounds) || r.addedRounds < 1) {
+      return null;
+    }
+    return { kind: "resume", runId: r.runId, addedRounds: r.addedRounds };
+  }
+
+  const plan = coercePlan(rawBody);
+  if (!plan) return null;
+  return { kind: "fresh", plan };
+}
+
 export async function handleRun(
   authHeader: string | null,
   rawBody: unknown,
@@ -135,9 +181,37 @@ export async function handleRun(
     return { status: 403, body: { error: "not allowlisted" } };
   }
 
-  const plan = coercePlan(rawBody);
-  if (!plan) {
+  const parsed = coerceRunRequest(rawBody);
+  if (!parsed) {
     return { status: 400, body: { error: "invalid plan" } };
+  }
+
+  let plan: Plan;
+  let priorTranscript: TranscriptEntry[] | undefined;
+
+  if (parsed.kind === "resume") {
+    // 他人の実行ID・存在しない実行IDは区別せず404にする（実行IDの存在自体を
+    // 外部に漏らさないため）。
+    const original = await deps.getRunById(auth.userId, parsed.runId);
+    if (!original) {
+      return { status: 404, body: { error: "run not found" } };
+    }
+    // PASSで終わった実行は条件を満たして終わっているので再開できない。
+    // クライアント側のボタン非表示に頼らず、ここで必ず弾く。
+    if (!isResumable(original.verdict)) {
+      return { status: 400, body: { error: "この実行はPASSで終了しているため、再開できません" } };
+    }
+    plan = {
+      before: [],
+      loop: original.plan.loop,
+      after: [],
+      rounds: parsed.addedRounds,
+      criteria: original.plan.criteria,
+      instruction: original.plan.instruction,
+    };
+    priorTranscript = original.transcript;
+  } else {
+    plan = parsed.plan;
   }
 
   const day = utcDay(deps.now?.() ?? new Date());
@@ -149,6 +223,7 @@ export async function handleRun(
     deps.dailyLimit,
     deps.callModel,
     deps.window ?? 12,
+    priorTranscript,
   );
 
   if (outcome.kind === "invalid") {

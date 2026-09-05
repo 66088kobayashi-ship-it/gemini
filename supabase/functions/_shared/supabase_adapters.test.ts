@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { assert, assertEquals } from "./test_util.ts";
-import { makeGetUsedToday, makeIsAllowlisted, makePersistRun, makeVerifyJwt } from "./supabase_adapters.ts";
+import {
+  makeGetRunById,
+  makeGetUsedToday,
+  makeIsAllowlisted,
+  makePersistRun,
+  makeVerifyJwt,
+} from "./supabase_adapters.ts";
 
 // 実の SupabaseClient は postgrest-js の複雑なビルダー型を持つため、テストでは
 // 実際に叩かれるメソッドだけを持つ最小のフェイクを作り、unknown 経由でキャストする。
@@ -119,4 +125,77 @@ Deno.test("makeVerifyJwt: 不正なトークンは null（ブラウザの状態�
   const verifyJwt = makeVerifyJwt(fakeAdmin);
   const result = await verifyJwt("Bearer invalid-token");
   assertEquals(result, null);
+});
+
+// ---------------------------------------------------------------------------
+// makeGetRunById: 再開のために、id と user_id の両方が一致する行だけを返す
+// ---------------------------------------------------------------------------
+
+Deno.test("makeGetRunById: id/user_idが一致すればplan/transcript/verdictを返す", async () => {
+  const seenFilters: Array<{ col: string; val: string }> = [];
+  const fakeAdmin = {
+    from: (_table: string) => ({
+      select: (_cols: string) => ({
+        eq: (col1: string, val1: string) => {
+          seenFilters.push({ col: col1, val: val1 });
+          return {
+            eq: (col2: string, val2: string) => {
+              seenFilters.push({ col: col2, val: val2 });
+              return {
+                maybeSingle: async () => ({
+                  data: {
+                    plan: { before: [], loop: [{ role: "propose", model: "m" }], after: [], rounds: 2, criteria: "c", instruction: "i" },
+                    transcript: [{ participantId: "loop:0", role: "propose", label: "提案", text: "t" }],
+                    verdict: "FAIL",
+                  },
+                  error: null,
+                }),
+              };
+            },
+          };
+        },
+      }),
+    }),
+  } as unknown as SupabaseClient;
+  const getRunById = makeGetRunById(fakeAdmin);
+  const result = await getRunById("user-1", "run-1");
+  assert(result !== null);
+  assertEquals(result?.verdict, "FAIL");
+  assertEquals(result?.plan.loop.length, 1);
+  assertEquals(seenFilters, [
+    { col: "id", val: "run-1" },
+    { col: "user_id", val: "user-1" },
+  ]);
+});
+
+Deno.test("makeGetRunById: 行が見つからなければnull（他人の実行/存在しない実行の両方）", async () => {
+  const fakeAdmin = {
+    from: (_table: string) => ({
+      select: (_cols: string) => ({
+        eq: (_c1: string, _v1: string) => ({
+          eq: (_c2: string, _v2: string) => ({
+            maybeSingle: async () => ({ data: null, error: null }),
+          }),
+        }),
+      }),
+    }),
+  } as unknown as SupabaseClient;
+  const getRunById = makeGetRunById(fakeAdmin);
+  assertEquals(await getRunById("user-1", "someone-elses-run"), null);
+});
+
+Deno.test("makeGetRunById: クエリ自体が失敗してもnull（握りつぶさずログには残す）", async () => {
+  const fakeAdmin = {
+    from: (_table: string) => ({
+      select: (_cols: string) => ({
+        eq: (_c1: string, _v1: string) => ({
+          eq: (_c2: string, _v2: string) => ({
+            maybeSingle: async () => ({ data: null, error: { message: "invalid input syntax for type uuid" } }),
+          }),
+        }),
+      }),
+    }),
+  } as unknown as SupabaseClient;
+  const getRunById = makeGetRunById(fakeAdmin);
+  assertEquals(await getRunById("user-1", "not-a-uuid"), null);
 });
