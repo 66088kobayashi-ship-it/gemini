@@ -17,6 +17,10 @@
   --tap:48px; --r:14px; --ease:cubic-bezier(.2,.7,.3,1);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+/* hidden属性は、その要素にdisplayを設定するクラス（.rounds/.runrow等）が
+   付いていると効かない（作者CSSがUAスタイルシートのdisplay:noneに勝つため）。
+   構造上のユーティリティであり、新しい色・フォント・角丸ではない。 */
+[hidden]{display:none!important}
 html,body{height:100%;margin:0;overflow:hidden}
 body{background:radial-gradient(120% 80% at 50% 12%,#16244170 0%,transparent 70%),var(--vat);
   color:var(--paper);font-family:"Noto Sans JP",system-ui,-apple-system,sans-serif;
@@ -35,6 +39,16 @@ body[data-screen="room"] #room{transform:translateX(0);opacity:1;pointer-events:
 #gate{transform:translateX(-100%);opacity:0;pointer-events:none}
 body[data-screen="gate"] #gate{transform:translateX(0);opacity:1;pointer-events:auto}
 body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;pointer-events:none}
+
+/* 履歴一覧・詳細も #room と同じ考え方（transform/opacity/pointer-events だけ）
+   で出し入れする。色・フォント・角丸は新規追加しない。 */
+#history{transform:translateX(100%);opacity:0;pointer-events:none}
+#detail{transform:translateX(100%);opacity:0;pointer-events:none}
+body[data-screen="history"] #loom{transform:translateX(-16%) scale(.96);opacity:0;pointer-events:none}
+body[data-screen="history"] #history{transform:translateX(0);opacity:1;pointer-events:auto}
+body[data-screen="detail"] #history{transform:translateX(-16%) scale(.96);opacity:0;pointer-events:none}
+body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-events:auto}
+#history,#detail{background:var(--room);display:flex;flex-direction:column}
 
 .bar{position:absolute;top:0;left:0;right:0;height:60px;z-index:40;
   display:flex;align-items:center;gap:var(--s2);padding:0 var(--s3);
@@ -227,6 +241,7 @@ body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;p
     <div class="bar">
       <div class="mark">結</div>
       <div class="gauge"><b id="left">50</b><span id="limitLabel">／50 本日ぶん</span></div>
+      <button class="back" id="openHistory" aria-label="履歴を見る">履歴</button>
       <button class="back" id="logout" aria-label="ログアウト">⏻</button>
     </div>
 
@@ -275,6 +290,35 @@ body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;p
     </div>
   </section>
 
+  <section class="view" id="history" aria-label="履歴">
+    <div class="rhead">
+      <button class="back" id="historyBack" aria-label="輪に戻る">‹</button>
+      <div><div class="rtitle">履歴</div></div>
+    </div>
+    <div class="log" id="historyLog"></div>
+  </section>
+
+  <section class="view" id="detail" aria-label="実行の詳細">
+    <div class="rhead">
+      <button class="back" id="detailBack" aria-label="履歴に戻る">‹</button>
+      <div><div class="rtitle" id="detailTitle">実行の詳細</div><div class="rsub" id="detailSub"></div></div>
+    </div>
+    <div class="log" id="detailLog"></div>
+    <div class="rounds" id="resumeRounds" hidden>
+      <span class="lb">追加周回</span>
+      <div class="step">
+        <button id="resumeMinus" aria-label="減らす">−</button>
+        <b id="resumeRnum">1</b>
+        <button id="resumePlus" aria-label="増やす">+</button>
+      </div>
+      <div class="cost" id="resumeCost"></div>
+    </div>
+    <div class="runrow" id="resumeRow" hidden style="padding:var(--s2) var(--s3)">
+      <div class="verdict" id="resumeVerdict"></div>
+      <button class="run" id="resumeBtn">続きから</button>
+    </div>
+  </section>
+
 </div>
 
 <script src="./config.js"></script>
@@ -283,13 +327,18 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   applyModelConfig,
   buildRedirectTo,
+  buildResumeRequest,
+  canResume,
   canSubmit,
   composeRunRequest,
+  endReasonLabel,
   extractOAuthErrorText,
   groupByLap,
   interpretRunResponse,
+  isResumable,
   mapErrorMessage,
   mapOAuthError,
+  resumeCallsNeeded,
   stripBossEntry,
   validateSupabaseUrl,
 } from "./logic.js";
@@ -645,14 +694,17 @@ supabase.auth.onAuthStateChange((_event, session)=>{
 // /run を呼び、返ってきた発言を吹き出しへ積む
 // ---------------------------------------------------------------------------
 
-function renderTranscript(transcript){
+function renderTranscriptInto(target, transcript, loopLength){
   // instruction（ボスの発言）はsend時点で自分のバブルとして既に表示済みなので、
   // ここで除いておかないと二重表示になり、周回のグルーピングもずれる。
-  const laps=groupByLap(stripBossEntry(transcript), plan.loop.length);
+  // （履歴詳細では自分のバブルを別途表示しないが、stripBossEntryしないと
+  // 「指示」自体が周回のグルーピングに混ざって1件ずれてしまうのは同じなので、
+  // ライブの会話室と同じ扱いにする。指示の文面自体は .pin で別途表示する）
+  const laps=groupByLap(stripBossEntry(transcript), loopLength);
   laps.forEach((lapEntries,lapIndex)=>{
     const tag=document.createElement('div');
     tag.className='lap'; tag.textContent=`${lapIndex+1}周目`;
-    logEl.appendChild(tag);
+    target.appendChild(tag);
     for(const entry of lapEntries){
       const r=ROLES[entry.role] || {hex:'#8593AE',icon:'i-check',display:''};
       const isPass=entry.text.trim().startsWith('PASS');
@@ -660,16 +712,22 @@ function renderTranscript(transcript){
       const d=document.createElement('div'); d.className='msg in';
       d.innerHTML=avatar(r)+`<div><div class="who">${escapeHtml(entry.label)} · ${escapeHtml(r.display||'')}</div>`+
         `<div class="bub"><p>${body}</p></div></div>`;
-      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
+      target.appendChild(d); target.scrollTop=target.scrollHeight;
     }
   });
 }
+function renderTranscript(transcript){
+  renderTranscriptInto(logEl, transcript, plan.loop.length);
+}
 
-function showRunError(message){
+function showErrorInto(target, message){
   const box=document.createElement('div');
   box.className='pin';
   box.innerHTML=`<b>エラー</b>${escapeHtml(message)}`;
-  logEl.appendChild(box); logEl.scrollTop=logEl.scrollHeight;
+  target.appendChild(box); target.scrollTop=target.scrollHeight;
+}
+function showRunError(message){
+  showErrorInto(logEl, message);
 }
 
 async function start(){
@@ -731,6 +789,149 @@ async function start(){
   busy=false;refresh();promptEl.focus();
   refreshQuota();
 }
+
+// ---------------------------------------------------------------------------
+// 履歴一覧・詳細・再開
+// runs テーブルは RLS で本人の行のみ読めるので、専用の Edge Function を
+// 経由せず supabase-js から直接 select する（record_run() 経由の書き込みと
+// 違って、読み取りは既に RLS だけで担保されている）。
+// ---------------------------------------------------------------------------
+
+const historyLog=$('historyLog'), detailLog=$('detailLog'),
+      detailTitle=$('detailTitle'), detailSub=$('detailSub'),
+      resumeRoundsEl=$('resumeRounds'), resumeRowEl=$('resumeRow'),
+      resumeMinusBtn=$('resumeMinus'), resumePlusBtn=$('resumePlus'),
+      resumeRnumEl=$('resumeRnum'), resumeCostEl=$('resumeCost'),
+      resumeVerdictEl=$('resumeVerdict'), resumeBtn=$('resumeBtn');
+
+let currentDetail=null; // { id, plan, transcript, verdict }
+let addedRounds=1;
+
+function formatDateTime(iso){
+  try{ return new Date(iso).toLocaleString('ja-JP'); }catch(e){ return iso; }
+}
+
+async function loadHistory(){
+  historyLog.innerHTML=`<div class="empty">読み込み中…</div>`;
+  const { data, error } = await supabase
+    .from('runs')
+    .select('id, plan, verdict, calls_actual, created_at')
+    .order('created_at', { ascending:false });
+  if(error){ historyLog.innerHTML=`<div class="empty">読み込めなかった</div>`; return; }
+  if(!data || data.length===0){ historyLog.innerHTML=`<div class="empty">まだ実行の記録が無い</div>`; return; }
+  historyLog.innerHTML='';
+  for(const row of data){
+    const roles=(row.plan?.loop||[]).map(s=>ROLES[s.role]?.label||s.role).join('→');
+    const b=document.createElement('button');
+    b.className='pin';
+    b.style.cssText='min-height:var(--tap);display:block;text-align:left;width:100%;margin-bottom:10px';
+    b.innerHTML=`<b>${escapeHtml(endReasonLabel(row.verdict))}</b>`+
+      `${escapeHtml(formatDateTime(row.created_at))} ・ ${escapeHtml(roles)} ・ `+
+      `${row.plan?.rounds ?? '?'}周 ・ ${row.calls_actual}回`;
+    b.onclick=()=>openDetail(row.id);
+    historyLog.appendChild(b);
+  }
+}
+
+function updateResumeUI(){
+  const n=currentDetail?.plan?.loop?.length||0;
+  const need=resumeCallsNeeded(n, addedRounds);
+  const leftN=QUOTA-used;
+  resumeRnumEl.textContent=addedRounds;
+  resumeMinusBtn.disabled=addedRounds<=1;
+  resumePlusBtn.disabled=addedRounds>=10;
+  resumeCostEl.innerHTML=`${need}回ぶん<br>残り${leftN}回`;
+  const check=canResume({resumable:isResumable(currentDetail?.verdict), callsNeeded:need, quotaRemaining:leftN});
+  resumeVerdictEl.textContent = check.reason==='quota'
+    ? `残り${leftN}回では${need-leftN}回足りない`
+    : `${n}人 × ${addedRounds}周 = ${need}回。残り${leftN}回`;
+  resumeVerdictEl.dataset.bad = check.reason==='quota' ? '1' : '0';
+  resumeBtn.disabled=!check.ok||busy;
+}
+resumeMinusBtn.onclick=()=>{ addedRounds=Math.max(1,addedRounds-1); updateResumeUI(); };
+resumePlusBtn.onclick =()=>{ addedRounds=Math.min(10,addedRounds+1); updateResumeUI(); };
+
+async function openDetail(runId){
+  document.body.dataset.screen='detail';
+  detailLog.innerHTML=`<div class="empty">読み込み中…</div>`;
+  resumeRoundsEl.hidden=true; resumeRowEl.hidden=true;
+  const { data, error } = await supabase
+    .from('runs')
+    .select('id, plan, transcript, verdict, calls_actual, created_at')
+    .eq('id', runId)
+    .single();
+  if(error || !data){ detailLog.innerHTML=`<div class="empty">読み込めなかった</div>`; return; }
+  currentDetail=data;
+  const roles=(data.plan?.loop||[]).map(s=>ROLES[s.role]?.label||s.role).join('→');
+  detailTitle.textContent=roles||'実行の詳細';
+  detailSub.textContent=`${data.plan?.rounds ?? '?'}周 ・ ${endReasonLabel(data.verdict)}`;
+  detailLog.innerHTML=`<div class="pin"><b>条件</b>${escapeHtml(data.plan?.criteria||'')}</div>`;
+  renderTranscriptInto(detailLog, data.transcript||[], data.plan?.loop?.length||1);
+
+  if(isResumable(data.verdict)){
+    addedRounds=1;
+    resumeRoundsEl.hidden=false; resumeRowEl.hidden=false;
+    updateResumeUI();
+  }
+}
+
+resumeBtn.onclick=async()=>{
+  if(!currentDetail||busy) return;
+  const { data:{ session } } = await supabase.auth.getSession();
+  if(!session) return;
+
+  busy=true; updateResumeUI();
+  const typing=document.createElement('div');
+  typing.className='msg in';
+  typing.innerHTML=`<div><div class="bub typing"><i></i><i></i><i></i></div></div>`;
+  detailLog.appendChild(typing); detailLog.scrollTop=detailLog.scrollHeight;
+
+  let res, body;
+  try{
+    const runBody=buildResumeRequest(currentDetail.id, addedRounds);
+    res=await fetch(`${FUNCTIONS_BASE}/run`,{
+      method:'POST',
+      headers:{ 'content-type':'application/json', Authorization:`Bearer ${session.access_token}` },
+      body:JSON.stringify(runBody),
+    });
+    body=await res.json();
+  }catch(e){
+    typing.remove();
+    showErrorInto(detailLog, mapErrorMessage(0,{}));
+    busy=false; updateResumeUI();
+    return;
+  }
+  typing.remove();
+
+  const outcome=interpretRunResponse(res.status, body);
+  if(outcome.kind==='error'){
+    showErrorInto(detailLog, outcome.message);
+    if(outcome.redirectToLogin) await handleUnauthorized();
+    busy=false; updateResumeUI();
+    return;
+  }
+
+  currentDetail={ ...currentDetail, transcript:outcome.transcript, verdict:outcome.verdict };
+  detailSub.textContent=`${currentDetail.plan?.rounds ?? '?'}周 ・ ${endReasonLabel(outcome.verdict)}`;
+  detailLog.innerHTML=`<div class="pin"><b>条件</b>${escapeHtml(currentDetail.plan?.criteria||'')}</div>`;
+  renderTranscriptInto(detailLog, outcome.transcript, currentDetail.plan?.loop?.length||1);
+  if(outcome.kind==='partial'){ showErrorInto(detailLog, outcome.warning); }
+
+  used+=outcome.callsActual;
+  busy=false;
+  if(isResumable(outcome.verdict)){
+    addedRounds=1;
+    resumeRoundsEl.hidden=false; resumeRowEl.hidden=false;
+    updateResumeUI();
+  }else{
+    resumeRoundsEl.hidden=true; resumeRowEl.hidden=true;
+  }
+  refreshQuota();
+};
+
+$('openHistory').onclick=async()=>{ document.body.dataset.screen='history'; await loadHistory(); };
+$('historyBack').onclick=()=>{ document.body.dataset.screen='loom'; };
+$('detailBack').onclick=()=>{ document.body.dataset.screen='history'; };
 
 const tray=$('tray');
 for(const [k,r] of Object.entries(ROLES)){

@@ -2,14 +2,19 @@ import { assert, assertEquals, assertNotEquals, assertThrows } from "../supabase
 import {
   applyModelConfig,
   buildRedirectTo,
+  buildResumeRequest,
   buildRunBody,
+  canResume,
   canSubmit,
   composeRunRequest,
+  endReasonLabel,
   extractOAuthErrorText,
   groupByLap,
   interpretRunResponse,
+  isResumable,
   mapErrorMessage,
   mapOAuthError,
+  resumeCallsNeeded,
   stripBossEntry,
   validateSupabaseUrl,
 } from "./logic.js";
@@ -429,4 +434,64 @@ Deno.test("stripBossEntry後にgroupByLapすると周回がずれない", () => 
   assertEquals(laps.length, 2);
   assertEquals(laps[0].map((e) => e.role), ["propose", "critic"]);
   assertEquals(laps[1].map((e) => e.role), ["propose", "critic"]);
+});
+
+// ---------------------------------------------------------------------------
+// 履歴・再開: isResumable / endReasonLabel / buildResumeRequest /
+// resumeCallsNeeded / canResume
+// ---------------------------------------------------------------------------
+
+Deno.test("isResumable: PASS以外（FAIL/null）はtrue、PASSはfalse", () => {
+  assertEquals(isResumable("PASS"), false);
+  assertEquals(isResumable("FAIL"), true);
+  assertEquals(isResumable(null), true);
+});
+
+Deno.test("endReasonLabel: PASS/FAIL/nullがそれぞれ異なる文言になる", () => {
+  const labels = new Set([endReasonLabel("PASS"), endReasonLabel("FAIL"), endReasonLabel(null)]);
+  assertEquals(labels.size, 3, `重複がある: ${JSON.stringify([...labels])}`);
+  assertEquals(endReasonLabel("PASS"), "PASS");
+});
+
+Deno.test("buildResumeRequest: runId/addedRoundsから{resume:{...}}を組み立てる", () => {
+  assertEquals(buildResumeRequest("run-123", 2), { resume: { runId: "run-123", addedRounds: 2 } });
+});
+
+Deno.test("buildResumeRequest: runId無しは即座に例外（渡し忘れを検出する）", () => {
+  assertThrows(() => buildResumeRequest("", 2));
+  assertThrows(() => buildResumeRequest(undefined as unknown as string, 2));
+});
+
+Deno.test("buildResumeRequest: addedRoundsが0以下/非整数は例外", () => {
+  assertThrows(() => buildResumeRequest("run-1", 0));
+  assertThrows(() => buildResumeRequest("run-1", -1));
+  assertThrows(() => buildResumeRequest("run-1", 1.5));
+});
+
+Deno.test("buildResumeRequest: 消費回数そのものは含まれない（calls的なフィールドが無い）", () => {
+  const body = buildResumeRequest("run-1", 3);
+  assert(!("calls" in body.resume));
+  assert(!("callsPlanned" in body.resume));
+});
+
+Deno.test("resumeCallsNeeded: 輪の人数×追加周回数", () => {
+  assertEquals(resumeCallsNeeded(2, 3), 6);
+  assertEquals(resumeCallsNeeded(5, 1), 5);
+});
+
+Deno.test("canResume: PASS済み（resumable:false）は再開不可", () => {
+  const r = canResume({ resumable: false, callsNeeded: 2, quotaRemaining: 10 });
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "not_resumable");
+});
+
+Deno.test("canResume: 残量不足なら再開不可", () => {
+  const r = canResume({ resumable: true, callsNeeded: 20, quotaRemaining: 10 });
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "quota");
+});
+
+Deno.test("canResume: 条件を満たせば再開可", () => {
+  const r = canResume({ resumable: true, callsNeeded: 6, quotaRemaining: 10 });
+  assertEquals(r.ok, true);
 });

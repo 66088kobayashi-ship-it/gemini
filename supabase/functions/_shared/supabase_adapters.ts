@@ -5,9 +5,11 @@
 
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import type {
+  GetRunByIdFn,
   GetUsedTodayFn,
   IsAllowlistedFn,
   PersistRunFn,
+  StoredRun,
   VerifyJwtFn,
 } from "./http_handlers.ts";
 
@@ -70,6 +72,34 @@ export function makeGetUsedToday(admin: SupabaseClient): GetUsedTodayFn {
       throw new Error("usage取得に失敗しました");
     }
     return (data as { calls: number } | null)?.calls ?? 0;
+  };
+}
+
+/** 「続きから」再開するために、保存済みの実行を1件読み出す。
+ * id と user_id の両方が一致する行だけを返す（他人の実行IDでは絶対に
+ * ヒットしない。service role で admin client を使っているため RLS を
+ * バイパスするので、所有者チェックはここで明示的に行う）。
+ * 見つからない場合（存在しない/他人の実行/クエリ自体の失敗）は
+ * すべて null にまとめる。呼び出し元はどちらも 404 として扱う。 */
+export function makeGetRunById(admin: SupabaseClient): GetRunByIdFn {
+  return async (userId, runId) => {
+    const { data, error } = await admin
+      .from("runs")
+      .select("plan, transcript, verdict")
+      .eq("id", runId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) {
+      console.error("run取得に失敗しました:", error.message);
+      return null;
+    }
+    if (!data) return null;
+    const row = data as { plan: unknown; transcript: unknown; verdict: "PASS" | "FAIL" | null };
+    return {
+      plan: row.plan as StoredRun["plan"],
+      transcript: row.transcript as StoredRun["transcript"],
+      verdict: row.verdict,
+    };
   };
 }
 

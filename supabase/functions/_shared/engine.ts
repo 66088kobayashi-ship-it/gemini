@@ -152,6 +152,13 @@ export interface RunPlanOptions {
   callModel: CallModelFn;
   window?: number;
   onEntry?: (entry: TranscriptEntry) => void;
+  /** 周回上限に達した実行を「続きから」再開するときに、前回の transcript を
+   * そのまま引き継ぐ。指定した場合、instruction の再挿入は行わない
+   * （すでに priorTranscript の先頭に含まれているはずのため、二重に
+   * 積むと会話が壊れる）。省略時は既存どおりの挙動（空から始まり、
+   * instruction を先頭に一度だけ積む）で、既存の呼び出し元には一切
+   * 影響しない。 */
+  priorTranscript?: TranscriptEntry[];
 }
 
 /** 計画を最初から最後まで実行する。分岐はなく、常に一直線。
@@ -159,14 +166,16 @@ export interface RunPlanOptions {
 export async function runPlan(plan: Plan, opts: RunPlanOptions): Promise<RunResult> {
   const window = opts.window ?? 12;
   const steps = flattenSteps(plan);
-  const transcript: TranscriptEntry[] = [];
+  const transcript: TranscriptEntry[] = opts.priorTranscript ? [...opts.priorTranscript] : [];
   let verdict: "PASS" | "FAIL" | null = null;
   let callsActual = 0;
 
   // instruction はボスの発言として transcript の先頭に一度だけ入れる。
   // 全員から見て「他人の発言」（role: "user"）になる。API 呼び出しは発生しない
   // ので callsActual には数えない。
-  if (plan.instruction && plan.instruction.trim().length > 0) {
+  // priorTranscript が渡された場合（再開）は、そこに既に instruction が
+  // 含まれているはずなので、ここでは追加しない。
+  if (!opts.priorTranscript && plan.instruction && plan.instruction.trim().length > 0) {
     transcript.push({
       participantId: BOSS_PARTICIPANT_ID,
       role: BOSS_ROLE,
@@ -256,13 +265,19 @@ export type ExecuteRunResult =
 /** /run のロジック本体（HTTP/認証/DBを含まない）。
  * JWT検証・allowlist照合はこれを呼び出す側（Edge Function）の責務。
  * 順序は必ず: 1) criteria検証 2) 消費回数の再計算 3) 残量チェック 4) 実行。
- * 逆順にすると1回分超過するため、この関数の外でも順序を変えないこと。 */
+ * 逆順にすると1回分超過するため、この関数の外でも順序を変えないこと。
+ *
+ * priorTranscript を渡すと「続きから」実行になる。この場合 plan は
+ * before/after を空にし、loop と rounds だけを「追加ぶん」として渡すこと
+ * （呼び出し側の責務）。callsPlanned(plan) はその追加ぶんだけを返すので、
+ * 消費回数の再計算式自体は一切変えていない。 */
 export async function executeRun(
   plan: Plan,
   usedToday: number,
   dailyLimit: number,
   callModel: CallModelFn,
   window = 12,
+  priorTranscript?: TranscriptEntry[],
 ): Promise<ExecuteRunResult> {
   const invalid = validatePlan(plan);
   if (invalid) {
@@ -275,6 +290,27 @@ export async function executeRun(
     return { kind: "quota_exceeded", status: 409, remaining: quota.remaining, needed };
   }
 
-  const result = await runPlan(plan, { callModel, window });
+  const result = await runPlan(plan, { callModel, window, priorTranscript });
   return { kind: "ok", result };
+}
+
+/** 周回上限に達して終わった実行かどうか（＝再開できるかどうか）。
+ * PASS で終わった実行は条件を満たして終わっているので再開できない。
+ * FAIL（検収が最後まで通らなかった）も null（検収役が無い等、判定が
+ * 出ないまま周回を使い切った）も、いずれも「周回上限に達した」に含まれ、
+ * 再開できる。表示上の終了理由の区別は endReasonOf が行う。 */
+export function isResumable(verdict: "PASS" | "FAIL" | null): boolean {
+  return verdict !== PASS_MARK;
+}
+
+export type EndReason = "pass" | "limit_reached" | "failed";
+
+/** 履歴一覧・詳細に表示する終了理由。
+ * PASS: 条件を満たして終了。 failed: 検収が最後までFAILのまま周回を
+ * 使い切った。limit_reached: 検収役が無い等、判定が出ないまま周回を
+ * 使い切った。failed/limit_reached はどちらも isResumable() = true。 */
+export function endReasonOf(verdict: "PASS" | "FAIL" | null): EndReason {
+  if (verdict === PASS_MARK) return "pass";
+  if (verdict === FAIL_MARK) return "failed";
+  return "limit_reached";
 }

@@ -6,7 +6,9 @@ import {
   callsPlanned,
   CallModelFn,
   checkQuota,
+  endReasonOf,
   executeRun,
+  isResumable,
   Plan,
   runPlan,
   TranscriptEntry,
@@ -383,6 +385,103 @@ Deno.test("validatePlan: loop が空は 400", () => {
   const err = validatePlan(makePlan({ loop: [] }));
   assert(err !== null);
   assertEquals(err?.status, 400);
+});
+
+// ---------------------------------------------------------------------------
+// 再開（priorTranscriptを渡して続きから実行する）
+// ---------------------------------------------------------------------------
+
+function priorTranscriptFixture(): TranscriptEntry[] {
+  return [
+    { participantId: BOSS_PARTICIPANT_ID, role: "boss", label: "指示", text: "新製品の告知文を書いてほしい" },
+    { participantId: "loop:0", role: "propose", label: "提案", text: "前回の提案" },
+    { participantId: "loop:1", role: "critic", label: "批判", text: "前回の批判" },
+  ];
+}
+
+Deno.test("runPlan: priorTranscriptを渡すと続きから実行し、instructionを再挿入しない", async () => {
+  const plan = makePlan({ loop: loopOf(2), rounds: 1 });
+  const prior = priorTranscriptFixture();
+  const callModel: CallModelFn = async () => "続きの応答";
+  const result = await runPlan(plan, { callModel, priorTranscript: prior });
+
+  // 前回の3件 + 今回の2件（loop長2 × 1周）= 5件
+  assertEquals(result.transcript.length, 5);
+  assertEquals(result.transcript[0], prior[0]);
+  assertEquals(result.transcript[1], prior[1]);
+  assertEquals(result.transcript[2], prior[2]);
+  // bossの発言（instruction）は再挿入されず、1件のまま
+  const bossEntries = result.transcript.filter((e) => e.participantId === BOSS_PARTICIPANT_ID);
+  assertEquals(bossEntries.length, 1);
+  // callsActualは今回の分だけ
+  assertEquals(result.callsActual, 2);
+});
+
+Deno.test("runPlan: priorTranscriptが無い既存の呼び出しは、これまで通りinstructionを1回だけ積む（回帰確認）", async () => {
+  const plan = makePlan({ loop: loopOf(2), rounds: 1, instruction: "書いて" });
+  const callModel: CallModelFn = async () => "応答";
+  const result = await runPlan(plan, { callModel });
+  const bossEntries = result.transcript.filter((e) => e.participantId === BOSS_PARTICIPANT_ID);
+  assertEquals(bossEntries.length, 1);
+  assertEquals(result.transcript.length, 3); // boss1件 + loop2件
+});
+
+Deno.test("runPlan: priorTranscriptを引き継いでも、各呼び出しでmessagesの先頭は必ず他人の発言になる", async () => {
+  const plan = makePlan({ loop: loopOf(2), rounds: 3 });
+  // 過去5周ぶんの長いtranscriptをでっち上げる
+  const prior: TranscriptEntry[] = [
+    { participantId: BOSS_PARTICIPANT_ID, role: "boss", label: "指示", text: "書いて" },
+  ];
+  for (let r = 0; r < 5; r++) {
+    prior.push(
+      { participantId: "loop:0", role: "propose", label: "提案", text: `propose-${r}` },
+      { participantId: "loop:1", role: "critic", label: "批判", text: `critic-${r}` },
+    );
+  }
+  for (const window of [1, 2, 3, 4, 12]) {
+    const seenFirstRoles: string[] = [];
+    const callModel: CallModelFn = async ({ messages }) => {
+      if (messages.length > 0) seenFirstRoles.push(messages[0].role);
+      return "続き";
+    };
+    await runPlan(plan, { callModel, window, priorTranscript: [...prior] });
+    for (const role of seenFirstRoles) {
+      assertEquals(role, "user", `window=${window} で先頭がassistantになった`);
+    }
+  }
+});
+
+Deno.test("executeRun: priorTranscriptがあっても、消費回数は「追加ぶん」のPlanだけで再計算される", async () => {
+  // 再開時のPlanはbefore/afterを空にし、loopとroundsだけを追加ぶんとして渡す
+  // （呼び出し側の責務）。callsPlannedはその追加ぶんだけを返す。
+  const plan = makePlan({ before: [], loop: loopOf(2), after: [], rounds: 4 });
+  const prior = priorTranscriptFixture(); // 3件（前回ぶん。今回のcallsPlannedには無関係）
+  let calls = 0;
+  const callModel: CallModelFn = async () => {
+    calls++;
+    return "応答";
+  };
+  const result = await executeRun(plan, 0, 100, callModel, 12, prior);
+  assert(result.kind === "ok");
+  if (result.kind === "ok") {
+    assertEquals(result.result.callsActual, 8); // 2人 × 4周
+    assertEquals(calls, 8);
+    assertEquals(result.result.transcript.length, prior.length + 8);
+  }
+});
+
+Deno.test("isResumable: PASS以外（FAIL/null）はtrue、PASSはfalse", () => {
+  assertEquals(isResumable("PASS"), false);
+  assertEquals(isResumable("FAIL"), true);
+  assertEquals(isResumable(null), true);
+});
+
+Deno.test("endReasonOf: PASS/FAIL/nullがそれぞれ別の終了理由になる", () => {
+  const reasons = new Set([endReasonOf("PASS"), endReasonOf("FAIL"), endReasonOf(null)]);
+  assertEquals(reasons.size, 3);
+  assertEquals(endReasonOf("PASS"), "pass");
+  assertEquals(endReasonOf("FAIL"), "failed");
+  assertEquals(endReasonOf(null), "limit_reached");
 });
 
 // ---------------------------------------------------------------------------

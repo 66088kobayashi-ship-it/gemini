@@ -7,6 +7,7 @@ import { handleRunRequest, RunDeps } from "./handler.ts";
 import { AuthContext } from "../_shared/http_handlers.ts";
 import { CallModelFn, Plan } from "../_shared/engine.ts";
 import { EmptyResponseError, InsufficientBalanceError, RateLimitedError, UpstreamErrorResponse } from "../_shared/openrouter.ts";
+import { StoredRun } from "../_shared/http_handlers.ts";
 
 const OK_AUTH: AuthContext = { userId: "user-1", email: "ok@example.com" };
 const NO_KEY_ENV = (_name: string): string | undefined => undefined;
@@ -54,6 +55,7 @@ function baseDeps(overrides: Partial<RunDeps> = {}): RunDeps {
     isAllowlisted: async () => true,
     getUsedToday: async () => 0,
     persistRun: async () => ({ ok: true, runId: "run-1" }),
+    getRunById: async () => null,
     callModel: fn,
     ...overrides,
   };
@@ -122,6 +124,7 @@ Deno.test("handleRunRequest: 全判定を通過した場合にのみ、キー不
     isAllowlisted: async () => true,
     getUsedToday: async () => 0,
     persistRun: async () => ({ ok: true, runId: "run-1" }),
+    getRunById: async () => null,
     // callModel を省略 -> makeLazyCallModel(getEnv) が使われ、実行時に例外を投げる
   };
   const res = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), deps);
@@ -251,4 +254,59 @@ Deno.test("handleRunRequest: 502は429/402/404/401とはすべて別のステー
   assertNotEquals(empty.status, balance.status);
   assertNotEquals(empty.status, 401);
   assertNotEquals(empty.status, 404);
+});
+
+// ---------------------------------------------------------------------------
+// /run の再開: handler.ts経由でもgetRunByIdが正しく配線されていることを確認する
+// (ロジック自体の網羅的なテストはhttp_handlers.test.tsにある)
+// ---------------------------------------------------------------------------
+
+function makeStoredRun(overrides: Partial<StoredRun> = {}): StoredRun {
+  return {
+    plan: {
+      before: [],
+      loop: [
+        { role: "propose", model: "openrouter/free-a" },
+        { role: "critic", model: "openrouter/free-b" },
+      ],
+      after: [],
+      rounds: 3,
+      criteria: "根拠のない主張を残さない",
+      instruction: "新製品の告知文を書いてほしい",
+    },
+    transcript: [
+      { participantId: "boss", role: "boss", label: "指示", text: "新製品の告知文を書いてほしい" },
+      { participantId: "loop:0", role: "propose", label: "提案", text: "前回の提案" },
+      { participantId: "loop:1", role: "critic", label: "批判", text: "前回の批判" },
+    ],
+    verdict: null,
+    ...overrides,
+  };
+}
+
+Deno.test("handleRunRequest: 再開の正常系（handler.ts経由でgetRunByIdが使われる）", async () => {
+  const deps = baseDeps({ getRunById: async () => makeStoredRun() });
+  const res = await handleRunRequest(
+    makeRequest({ resume: { runId: "run-1", addedRounds: 2 } }, "Bearer good-jwt"),
+    deps,
+  );
+  assertEquals(res.status, 200);
+});
+
+Deno.test("handleRunRequest: PASS済みの実行の再開はhandler.ts経由でも400になる", async () => {
+  const deps = baseDeps({ getRunById: async () => makeStoredRun({ verdict: "PASS" }) });
+  const res = await handleRunRequest(
+    makeRequest({ resume: { runId: "run-1", addedRounds: 2 } }, "Bearer good-jwt"),
+    deps,
+  );
+  assertEquals(res.status, 400);
+});
+
+Deno.test("handleRunRequest: 他人/存在しない実行IDの再開はhandler.ts経由でも404になる", async () => {
+  const deps = baseDeps({ getRunById: async () => null });
+  const res = await handleRunRequest(
+    makeRequest({ resume: { runId: "not-mine", addedRounds: 2 } }, "Bearer good-jwt"),
+    deps,
+  );
+  assertEquals(res.status, 404);
 });

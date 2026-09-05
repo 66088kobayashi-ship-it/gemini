@@ -1,12 +1,13 @@
-import { assert, assertEquals } from "./test_util.ts";
+import { assert, assertEquals, assertNotEquals } from "./test_util.ts";
 import {
   AuthContext,
   HandleRunDeps,
   handleQuota,
   handleRun,
   PersistRunOutput,
+  StoredRun,
 } from "./http_handlers.ts";
-import { CallModelFn, Plan } from "./engine.ts";
+import { CallModelFn, Plan, TranscriptEntry } from "./engine.ts";
 
 const OK_AUTH: AuthContext = { userId: "user-1", email: "ok@example.com" };
 
@@ -42,8 +43,37 @@ function baseDeps(overrides: Partial<HandleRunDeps> = {}): HandleRunDeps {
     isAllowlisted: async () => true,
     getUsedToday: async () => 0,
     persistRun: async () => ({ ok: true, runId: "run-1" }),
+    getRunById: async () => null, // 明示的にオーバーライドしない限り、再開の対象は無い
     callModel: fn,
     dailyLimit: 50,
+    ...overrides,
+  };
+}
+
+function makeResumeBody(runId: string, addedRounds: number): unknown {
+  return { resume: { runId, addedRounds } };
+}
+
+function makeStoredRun(overrides: Partial<StoredRun> = {}): StoredRun {
+  const priorTranscript: TranscriptEntry[] = [
+    { participantId: "boss", role: "boss", label: "指示", text: "新製品の告知文を書いてほしい" },
+    { participantId: "loop:0", role: "propose", label: "提案", text: "前回の提案" },
+    { participantId: "loop:1", role: "critic", label: "批判", text: "前回の批判" },
+  ];
+  return {
+    plan: {
+      before: [],
+      loop: [
+        { role: "propose", model: "openrouter/free-a" },
+        { role: "critic", model: "openrouter/free-b" },
+      ],
+      after: [],
+      rounds: 3,
+      criteria: "根拠のない主張を残さない",
+      instruction: "新製品の告知文を書いてほしい",
+    },
+    transcript: priorTranscript,
+    verdict: null, // 周回上限に達して終わった実行（PASSではない）
     ...overrides,
   };
 }
@@ -201,4 +231,183 @@ Deno.test("handleQuota: 正常系で used/limit/remaining を返す", async () =
   });
   assertEquals(res.status, 200);
   assertEquals(res.body, { used: 12, limit: 50, remaining: 38 });
+});
+
+// ---------------------------------------------------------------------------
+// /run の再開（resume）: 周回上限で終わった実行だけを続きから実行できる
+// ---------------------------------------------------------------------------
+
+Deno.test("handleRun: 再開はJWT/allowlistより後に判定される（未認証はgetRunByIdを呼ばない）", async () => {
+  let getRunByIdCalls = 0;
+  const deps = baseDeps({
+    verifyJwt: async () => null,
+    getRunById: async () => {
+      getRunByIdCalls++;
+      return makeStoredRun();
+    },
+  });
+  const res = await handleRun(null, makeResumeBody("run-1", 2), deps);
+  assertEquals(res.status, 401);
+  assertEquals(getRunByIdCalls, 0);
+});
+
+Deno.test("handleRun: allowlist外の再開要求はgetRunByIdを呼ばずに403", async () => {
+  let getRunByIdCalls = 0;
+  const deps = baseDeps({
+    isAllowlisted: async () => false,
+    getRunById: async () => {
+      getRunByIdCalls++;
+      return makeStoredRun();
+    },
+  });
+  const res = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 2), deps);
+  assertEquals(res.status, 403);
+  assertEquals(getRunByIdCalls, 0);
+});
+
+Deno.test("handleRun: 他人の実行ID・存在しない実行IDでの再開は404、呼び出し0回", async () => {
+  const { fn, count } = countingCallModel();
+  const deps = baseDeps({ getRunById: async () => null, callModel: fn });
+  const res = await handleRun("Bearer good-jwt", makeResumeBody("not-mine-or-missing", 2), deps);
+  assertEquals(res.status, 404);
+  assertEquals(count(), 0);
+});
+
+Deno.test("handleRun: PASSで終わった実行の再開要求は400、呼び出し0回", async () => {
+  const { fn, count } = countingCallModel();
+  const deps = baseDeps({
+    getRunById: async () => makeStoredRun({ verdict: "PASS" }),
+    callModel: fn,
+  });
+  const res = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 2), deps);
+  assertEquals(res.status, 400);
+  assertEquals(count(), 0);
+});
+
+Deno.test("handleRun: FAIL/nullで終わった実行はどちらも再開できる（200）", async () => {
+  for (const verdict of ["FAIL", null] as const) {
+    const deps = baseDeps({ getRunById: async () => makeStoredRun({ verdict }) });
+    const res = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 1), deps);
+    assertEquals(res.status, 200, `verdict=${verdict} で再開できるべき`);
+  }
+});
+
+Deno.test("handleRun: 再開の消費回数は「追加周回数×人数」のみ（前回ぶんを含まない）", async () => {
+  const persisted: Array<{ callsActual: number; callsPlanned: number }> = [];
+  const stored = makeStoredRun(); // loop長 2
+  const deps = baseDeps({
+    getRunById: async () => stored,
+    persistRun: async (input) => {
+      persisted.push({ callsActual: input.callsActual, callsPlanned: input.callsPlanned });
+      return { ok: true, runId: "run-2" };
+    },
+  });
+  const res = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 4), deps);
+  assertEquals(res.status, 200);
+  assertEquals(persisted.length, 1);
+  // 4周 × 2人 = 8回。前回のtranscript(3件)の長さとは無関係。
+  assertEquals(persisted[0].callsActual, 8);
+  assertEquals(persisted[0].callsPlanned, 8);
+  const body = res.body as { callsActual: number; callsPlanned: number };
+  assertEquals(body.callsActual, 8);
+  assertEquals(body.callsPlanned, 8);
+});
+
+Deno.test("handleRun: 再開でクライアントが calls を偽って送っても無視される", async () => {
+  const stored = makeStoredRun();
+  const deps = baseDeps({ getRunById: async () => stored });
+  const body = makeResumeBody("run-1", 4) as Record<string, unknown>;
+  body.calls = 1; // 嘘の申告
+  const res = await handleRun("Bearer good-jwt", body, deps);
+  assertEquals(res.status, 200);
+  assertEquals((res.body as { callsActual: number }).callsActual, 8);
+});
+
+Deno.test("handleRun: 再開時、残量不足なら409で実行されない", async () => {
+  const { fn, count } = countingCallModel();
+  const stored = makeStoredRun(); // loop長2 -> 4周で8回必要
+  const deps = baseDeps({
+    getRunById: async () => stored,
+    getUsedToday: async () => 45,
+    dailyLimit: 50, // 残り5回しかない
+    callModel: fn,
+  });
+  const res = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 4), deps);
+  assertEquals(res.status, 409);
+  assertEquals(count(), 0);
+});
+
+Deno.test("handleRun: 再開時、前回のtranscriptが新しいtranscriptの先頭に引き継がれ、instructionは重複しない", async () => {
+  const stored = makeStoredRun();
+  const deps = baseDeps({ getRunById: async () => stored });
+  const res = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 1), deps);
+  assertEquals(res.status, 200);
+  const body = res.body as { transcript: TranscriptEntry[] };
+  // 前回の3件（boss含む） + 今回の2件（loop長2 × 1周）= 5件
+  assertEquals(body.transcript.length, 5);
+  assertEquals(body.transcript[0].participantId, "boss");
+  assertEquals(body.transcript[1].text, "前回の提案");
+  assertEquals(body.transcript[2].text, "前回の批判");
+  // bossの発言は先頭の1件だけ（再挿入されていない）
+  const bossEntries = body.transcript.filter((e) => e.participantId === "boss");
+  assertEquals(bossEntries.length, 1);
+});
+
+Deno.test("handleRun: 再開時もAPIに渡される配列の先頭は必ず他人の発言になる", async () => {
+  // 過去に何周も回った長いtranscriptを模し、再開後の各呼び出しでモデルに
+  // 渡されるmessagesの先頭がuser（他人の発言）であることを確認する。
+  const longPriorTranscript: TranscriptEntry[] = [
+    { participantId: "boss", role: "boss", label: "指示", text: "書いて" },
+  ];
+  for (let r = 0; r < 5; r++) {
+    longPriorTranscript.push(
+      { participantId: "loop:0", role: "propose", label: "提案", text: `propose-${r}` },
+      { participantId: "loop:1", role: "critic", label: "批判", text: `critic-${r}` },
+    );
+  }
+  const stored = makeStoredRun({ transcript: longPriorTranscript });
+  const seenFirstRoles: string[] = [];
+  const callModel: CallModelFn = async ({ messages }) => {
+    if (messages.length > 0) seenFirstRoles.push(messages[0].role);
+    return "続きの応答";
+  };
+  const deps = baseDeps({ getRunById: async () => stored, callModel });
+  const res = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 2), deps);
+  assertEquals(res.status, 200);
+  assert(seenFirstRoles.length > 0);
+  for (const role of seenFirstRoles) {
+    assertEquals(role, "user", "再開後の呼び出しで先頭が自分の発言(assistant)になっている");
+  }
+});
+
+Deno.test("handleRun: plan と resume の両方/どちらも無い場合は400、getRunByIdもcallModelも呼ばない", async () => {
+  const { fn, count } = countingCallModel();
+  let getRunByIdCalls = 0;
+  const deps = baseDeps({
+    getRunById: async () => {
+      getRunByIdCalls++;
+      return null;
+    },
+    callModel: fn,
+  });
+  const bothRes = await handleRun(
+    "Bearer good-jwt",
+    { plan: (makePlanBody() as { plan: Plan }).plan, resume: { runId: "x", addedRounds: 1 } },
+    deps,
+  );
+  const neitherRes = await handleRun("Bearer good-jwt", {}, deps);
+  assertEquals(bothRes.status, 400);
+  assertEquals(neitherRes.status, 400);
+  assertEquals(getRunByIdCalls, 0);
+  assertEquals(count(), 0);
+});
+
+Deno.test("handleRun: 再開でも429/402/401とは別に、PASS拒否(400)・未検出(404)がそれぞれ別ステータスになる", async () => {
+  const passDeps = baseDeps({ getRunById: async () => makeStoredRun({ verdict: "PASS" }) });
+  const missingDeps = baseDeps({ getRunById: async () => null });
+  const passRes = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 1), passDeps);
+  const missingRes = await handleRun("Bearer good-jwt", makeResumeBody("run-1", 1), missingDeps);
+  assertEquals(passRes.status, 400);
+  assertEquals(missingRes.status, 404);
+  assertNotEquals(passRes.status, missingRes.status);
 });

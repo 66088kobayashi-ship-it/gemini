@@ -157,6 +157,71 @@ export function composeRunRequest({
   return buildRunBody({ before, loop, after, rounds }, criteriaText, promptText);
 }
 
+/** 周回上限に達して終わった実行かどうか（＝再開できるかどうか）。
+ * サーバー側（engine.ts の isResumable）と同じ判定をフロント表示用に
+ * 複製したもの。PASSで終わった実行は条件を満たして終わっているので
+ * 再開できない。実際に再開できるかどうかは必ずサーバー側で再判定される
+ * （ここでの判定は「続きから」ボタンを出す/出さないの表示制御にすぎず、
+ * 信用の根拠ではない）。
+ * @param {"PASS"|"FAIL"|null} verdict
+ * @returns {boolean}
+ */
+export function isResumable(verdict) {
+  return verdict !== "PASS";
+}
+
+/** 履歴一覧・詳細に表示する終了理由の文言。3つとも異なる文言にする。
+ * @param {"PASS"|"FAIL"|null} verdict
+ * @returns {string}
+ */
+export function endReasonLabel(verdict) {
+  if (verdict === "PASS") return "PASS";
+  if (verdict === "FAIL") return "失敗";
+  return "上限到達";
+}
+
+/** POST /run の「続きから」リクエストボディを組み立てる。
+ * 消費回数そのものは一切含めない（サーバー側が addedRounds と輪の人数から
+ * 再計算する）。runId/addedRounds を渡し忘れると即座に例外にする
+ * （instructionの渡し忘れバグと同じ理由: 黙って壊れた状態で送信しない）。
+ * @param {string} runId
+ * @param {number} addedRounds
+ */
+export function buildResumeRequest(runId, addedRounds) {
+  if (!runId || String(runId).trim().length === 0) {
+    throw new Error("buildResumeRequest: runId is required");
+  }
+  if (!Number.isInteger(addedRounds) || addedRounds < 1) {
+    throw new Error("buildResumeRequest: addedRounds must be a positive integer");
+  }
+  return { resume: { runId, addedRounds } };
+}
+
+/** 再開時の消費回数 = 追加する周回数 × 輪の人数。表示と実際のリクエストの
+ * 両方がこの1つの式だけを使うことで、画面表示と実際の呼び出し回数が
+ * ずれることを構造的に防ぐ。
+ * @param {number} loopLength
+ * @param {number} addedRounds
+ */
+export function resumeCallsNeeded(loopLength, addedRounds) {
+  return loopLength * addedRounds;
+}
+
+/** 再開ボタンを押せるかどうかの判定。既存の canSubmit と同じ形にした
+ * 専用の判定関数（criteriaの再入力は無いので条件が異なるため分けている）。
+ * ここでの判定はUI制御にすぎず、実際の可否は必ずサーバー側で再判定される。
+ * @param {{resumable: boolean, callsNeeded: number, quotaRemaining: number}} args
+ */
+export function canResume({ resumable, callsNeeded, quotaRemaining }) {
+  if (!resumable) {
+    return { ok: false, reason: "not_resumable" };
+  }
+  if (callsNeeded > quotaRemaining) {
+    return { ok: false, reason: "quota" };
+  }
+  return { ok: true, reason: null };
+}
+
 /** 送信可能かどうかの判定。既存 UI の refresh() が持っていた条件をそのまま
  * 純粋関数として切り出したもの。 */
 export function canSubmit({ loopLength, criteria, callsNeeded, quotaRemaining }) {
