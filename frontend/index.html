@@ -313,16 +313,22 @@ try {
 // config.js から差し替えられる。無料枠の間は display に実際のモデル名を入れる
 // ことで、表示が嘘にならないようにする。
 // ---------------------------------------------------------------------------
-// 無料モデルの一覧は入れ替わる。以前ここに置いていた2つのIDは実在しなく
-// なっていたことが確認された（2026-09-05）。デプロイ前チェックリストで
-// https://openrouter.ai/models の現存確認を必ず行うこと。
-// 検収は批判と同じモデルにしない（批判の指摘をそのまま追認しやすくなるため）。
+// 無料モデルの一覧は入れ替わる。カタログに存在するだけでは不十分で、
+// 実際に応答を返すかどうかは実機で確認する必要がある。
+// nvidia/nemotron-3-ultra-550b-a55b:free はカタログには存在するが、
+// 実機確認（2ロール×1周）で応答が一切返らないことが確認された
+// （finish_reason=null, messageのキー=[], usage=null。詳細はREADME参照）。
+// このため既定から外した。デプロイ前チェックリストで
+// https://openrouter.ai/models の現存確認に加え、実機での応答確認も行うこと。
+// 提案と批判は別モデルにする（同一だと批判の指摘が甘くなる）。
+// 検収は今回に限り批判と同じモデル（Laguna）を使い回す。現時点で応答が
+// 確認できている無料モデルが2つ（MiniMax M3 / Laguna S 2.1）しか無いため。
 const DEFAULT_MODEL_CONFIG = {
-  propose:  { model: "nvidia/nemotron-3-ultra-550b-a55b:free", display: "Nemotron 3 Ultra" },
-  critic:   { model: "minimax/minimax-m3:free",                display: "MiniMax M3" },
-  check:    { model: "poolside/laguna-s-2.1:free",             display: "Laguna S 2.1" },
-  research: { model: "nvidia/nemotron-3-ultra-550b-a55b:free", display: "Nemotron 3 Ultra" },
-  digest:   { model: "minimax/minimax-m3:free",                display: "MiniMax M3" },
+  propose:  { model: "minimax/minimax-m3:free",     display: "MiniMax M3" },
+  critic:   { model: "poolside/laguna-s-2.1:free",  display: "Laguna S 2.1" },
+  check:    { model: "poolside/laguna-s-2.1:free",  display: "Laguna S 2.1" },
+  research: { model: "minimax/minimax-m3:free",     display: "MiniMax M3" },
+  digest:   { model: "minimax/minimax-m3:free",     display: "MiniMax M3" },
 };
 const MODEL_CONFIG = applyModelConfig(DEFAULT_MODEL_CONFIG, window.YUI_CONFIG?.models);
 

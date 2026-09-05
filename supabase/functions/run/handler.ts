@@ -28,7 +28,13 @@ import {
   makePersistRun,
   makeVerifyJwt,
 } from "../_shared/supabase_adapters.ts";
-import { InsufficientBalanceError, makeOpenRouterCaller, RateLimitedError } from "../_shared/openrouter.ts";
+import {
+  EmptyResponseError,
+  InsufficientBalanceError,
+  makeOpenRouterCaller,
+  RateLimitedError,
+  UpstreamErrorResponse,
+} from "../_shared/openrouter.ts";
 
 export interface RunDeps {
   getEnv: (name: string) => string | undefined;
@@ -102,7 +108,15 @@ export async function handleRunRequest(req: Request, deps?: RunDeps): Promise<Re
       // 原因が違うので、専用のステータスのまま返す（500に丸めない）。
       return jsonResponse(429, { error: e.message });
     }
-    // それ以外（content欠落・truncation等）の診断情報は、キー・トークンの
+    if (e instanceof EmptyResponseError || e instanceof UpstreamErrorResponse) {
+      // モデルが実質的に応答しなかったケース（200だがcontentが無い/
+      // choicesが空/トップレベルにerrorが入っている）。402(残高不足)や
+      // 429(混雑)、404(モデルID誤り)とは原因が違うので、専用のステータス
+      // のまま返す（500に丸めない。フロントが「別のモデルを試す」という
+      // 具体的な次の一手を案内できるようにする）。
+      return jsonResponse(502, { error: e.message });
+    }
+    // それ以外（truncation等）の診断情報は、キー・トークンの
     // 中身を含まない形で構築済みなので、サーバーログにそのまま残す。
     console.error("run failed:", e instanceof Error ? e.message : String(e));
     return jsonResponse(500, { error: "server misconfigured" });
