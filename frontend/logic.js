@@ -2,6 +2,47 @@
 // ブラウザからは <script type="module"> で読み込み、テストは deno test で
 // このファイルを直接 import する（同じファイルを両方から使う）。
 
+const KNOWN_SUPABASE_SUBPATHS = ["/rest/v1", "/auth/v1", "/functions/v1", "/storage/v1", "/realtime/v1"];
+
+/**
+ * config.js の supabaseUrl を検証・正規化する。
+ *
+ * supabase-js は createClient() に渡した URL に対して内部で /rest/v1 や
+ * /auth/v1 を自分で付け足す。Edge Function の呼び出し先も
+ * `${supabaseUrl}/functions/v1` として組み立てる。そのため supabaseUrl 自体に
+ * サブパスが付いていると、実際のリクエストが `/rest/v1/rest/v1/...` や
+ * `.../rest/v1//functions/v1` のような壊れたURLになる。
+ *
+ * このミスは実際に一度起きた（Project Settings の表示からコピーする際に
+ * `/rest/v1/` まで含めてしまった）。無言で誤ったURLを組み立てず、
+ * 起動時に気づけるよう即座に例外にする。
+ *
+ * 末尾スラッシュは実害が無い（削れば済む）ので、弾かずに正規化するだけに
+ * とどめる。ここで削らずに通すと `${url}/functions/v1` が
+ * `.../supabase.co//functions/v1` のように二重スラッシュになってしまう。
+ *
+ * @param {string} url
+ * @returns {string} 末尾スラッシュを除いた正規化済みURL
+ */
+export function validateSupabaseUrl(url) {
+  if (typeof url !== "string" || url.trim().length === 0) {
+    throw new Error("config.js の supabaseUrl が設定されていません");
+  }
+  const normalized = url.replace(/\/+$/, "");
+  const lower = normalized.toLowerCase();
+  for (const sub of KNOWN_SUPABASE_SUBPATHS) {
+    if (lower.endsWith(sub)) {
+      throw new Error(
+        `config.js の supabaseUrl にサブパス "${sub}" が含まれています。` +
+          `Project Settings → API の「Project URL」に表示される、` +
+          `サブパスの付かない素のURL（例: https://xxxxx.supabase.co）を入れてください。` +
+          `渡された値: ${url}`,
+      );
+    }
+  }
+  return normalized;
+}
+
 /** POST /run のボディを組み立てる。plan.before / plan.after が未指定でも
  * 常に配列として含める（省略すると calls の再計算が噛み合わなくなる）。
  * criteria（どうなったら終わりか）と instruction（何をしてほしいか）は
