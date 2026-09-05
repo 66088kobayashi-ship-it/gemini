@@ -253,13 +253,14 @@ Deno.test("canSubmit: 条件を満たせば送信可", () => {
 // エラー文言: 401/403/400/409/402/207 がそれぞれ別の文言
 // ---------------------------------------------------------------------------
 
-Deno.test("エラー文言: 401/403/400/409/402/207 はすべて異なる文言になる", () => {
+Deno.test("エラー文言: 401/403/400/409/402/429/207 はすべて異なる文言になる", () => {
   const messages = new Set<string>();
   messages.add(mapErrorMessage(401, {}));
   messages.add(mapErrorMessage(403, {}));
   messages.add(mapErrorMessage(400, {}));
   messages.add(mapErrorMessage(409, { needed: 9, remaining: 3 }));
   messages.add(mapErrorMessage(402, {}));
+  messages.add(mapErrorMessage(429, {}));
   const partial = interpretRunResponse(207, {
     transcript: [],
     verdict: null,
@@ -269,7 +270,15 @@ Deno.test("エラー文言: 401/403/400/409/402/207 はすべて異なる文言�
   });
   assert(partial.kind === "partial");
   if (partial.kind === "partial") messages.add(partial.warning);
-  assertEquals(messages.size, 6, `重複がある: ${JSON.stringify([...messages])}`);
+  assertEquals(messages.size, 7, `重複がある: ${JSON.stringify([...messages])}`);
+});
+
+Deno.test("エラー文言: 429は「混雑・再試行」の趣旨で、402/404/401とは別の文言になる", () => {
+  const rateLimited = mapErrorMessage(429, {});
+  assert(rateLimited.includes("混") || rateLimited.includes("待"));
+  assertNotEquals(rateLimited, mapErrorMessage(402, {}));
+  assertNotEquals(rateLimited, mapErrorMessage(401, {}));
+  assertNotEquals(rateLimited, mapErrorMessage(404, {}));
 });
 
 Deno.test("エラー文言: 409は残り回数と不足回数を含む（既存文言と同じ形）", () => {

@@ -28,7 +28,7 @@ import {
   makePersistRun,
   makeVerifyJwt,
 } from "../_shared/supabase_adapters.ts";
-import { InsufficientBalanceError, makeOpenRouterCaller } from "../_shared/openrouter.ts";
+import { InsufficientBalanceError, makeOpenRouterCaller, RateLimitedError } from "../_shared/openrouter.ts";
 
 export interface RunDeps {
   getEnv: (name: string) => string | undefined;
@@ -97,6 +97,13 @@ export async function handleRunRequest(req: Request, deps?: RunDeps): Promise<Re
     if (e instanceof InsufficientBalanceError) {
       return jsonResponse(402, { error: e.message });
     }
+    if (e instanceof RateLimitedError) {
+      // 429はモデル側の一時的な混雑。402(残高不足)や404(モデルID誤り)とは
+      // 原因が違うので、専用のステータスのまま返す（500に丸めない）。
+      return jsonResponse(429, { error: e.message });
+    }
+    // それ以外（content欠落・truncation等）の診断情報は、キー・トークンの
+    // 中身を含まない形で構築済みなので、サーバーログにそのまま残す。
     console.error("run failed:", e instanceof Error ? e.message : String(e));
     return jsonResponse(500, { error: "server misconfigured" });
   }

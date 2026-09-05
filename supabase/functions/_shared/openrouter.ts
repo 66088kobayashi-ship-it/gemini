@@ -13,6 +13,65 @@ export class InsufficientBalanceError extends Error {
   }
 }
 
+/** リトライを使い切った429（無料モデルの共有枠での混雑）。
+ * 402（残高不足）や404（モデルID誤り）とは原因が違うので、専用の型にする。 */
+export class RateLimitedError extends Error {
+  constructor(message = "OpenRouterが混み合っている") {
+    super(message);
+    this.name = "RateLimitedError";
+  }
+}
+
+/** content が空だったときの診断情報。キー・トークンの中身は一切含めない
+ * （finish_reason・messageのキー名一覧・トークン数のみ）。 */
+export interface ResponseDiagnostics {
+  finishReason: string | null;
+  messageKeys: string[];
+  usage: unknown;
+}
+
+/** finish_reason === "length"（max_tokens不足で本文が出る前に打ち切られた）。
+ * モデルの故障ではないので、空応答一般とは別のエラーにする。 */
+export class TruncatedResponseError extends Error {
+  finishReason: string | null;
+  usage: unknown;
+  constructor(d: ResponseDiagnostics) {
+    super(
+      `OpenRouterの応答が途中で打ち切られました (finish_reason=${d.finishReason})。` +
+        `max_tokensが不足している可能性があります。usage=${JSON.stringify(d.usage)}`,
+    );
+    this.name = "TruncatedResponseError";
+    this.finishReason = d.finishReason;
+    this.usage = d.usage;
+  }
+}
+
+/** content が空（truncation以外の原因）。推論モデルが message.reasoning
+ * にしか本文を返していない場合は reasoningOnly を立てて区別する
+ * （reasoning を content の代わりに使うことはしない。指示や検収の
+ * 判定材料は最終回答であるべきで、内部の思考過程を紛れ込ませたくない）。 */
+export class EmptyResponseError extends Error {
+  finishReason: string | null;
+  messageKeys: string[];
+  usage: unknown;
+  reasoningOnly: boolean;
+  constructor(d: ResponseDiagnostics & { reasoningOnly: boolean }) {
+    const reasoningNote = d.reasoningOnly
+      ? "message.reasoningのみが返り、contentが空でした（推論モデルが本文を出していません）。"
+      : "";
+    super(
+      `OpenRouterの応答にcontentがありません。${reasoningNote}` +
+        `finish_reason=${d.finishReason}, messageのキー=[${d.messageKeys.join(", ")}], ` +
+        `usage=${JSON.stringify(d.usage)}`,
+    );
+    this.name = "EmptyResponseError";
+    this.finishReason = d.finishReason;
+    this.messageKeys = d.messageKeys;
+    this.usage = d.usage;
+    this.reasoningOnly = d.reasoningOnly;
+  }
+}
+
 export interface OpenRouterOptions {
   apiKey: string;
   maxTokens?: number;
@@ -58,11 +117,23 @@ export function makeOpenRouterCaller(opts: OpenRouterOptions): CallModelFn {
 
       if (res.ok) {
         const data = await res.json();
-        const content = data?.choices?.[0]?.message?.content;
-        if (typeof content !== "string" || content.length === 0) {
-          throw new Error("OpenRouterの応答にcontentがありません");
+        const choice = data?.choices?.[0];
+        const message = choice?.message ?? {};
+        const finishReason: string | null = choice?.finish_reason ?? null;
+        const usage = data?.usage ?? null;
+        const messageKeys = message && typeof message === "object" ? Object.keys(message) : [];
+        const content = typeof message.content === "string" ? message.content : "";
+
+        if (content.length > 0) {
+          return content;
         }
-        return content;
+
+        if (finishReason === "length") {
+          throw new TruncatedResponseError({ finishReason, messageKeys, usage });
+        }
+
+        const reasoningOnly = typeof message.reasoning === "string" && message.reasoning.length > 0;
+        throw new EmptyResponseError({ finishReason, messageKeys, usage, reasoningOnly });
       }
 
       await res.body?.cancel().catch(() => {});
@@ -73,6 +144,9 @@ export function makeOpenRouterCaller(opts: OpenRouterOptions): CallModelFn {
 
       const retryable = res.status === 429 || (res.status >= 500 && res.status < 600);
       if (!retryable || attempt === maxAttempts) {
+        if (res.status === 429) {
+          throw new RateLimitedError();
+        }
         throw new Error(`OpenRouterがエラーを返しました (status=${res.status})`);
       }
       await sleepFn(delayMs);
