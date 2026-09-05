@@ -92,6 +92,11 @@ Supabase ダッシュボードの **Project Settings → Edge Functions → Secr
 
 `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` は Supabase が自動で注入する。
 
+（この表は **Supabase側**のEdge Function Secret。デプロイに使う
+**GitHubリポジトリ側**のSecret、`SUPABASE_ACCESS_TOKEN` /
+`SUPABASE_PROJECT_REF` は次の「3. Edge Functionをデプロイする」を参照。
+別のダッシュボードに登録する別物なので混同しないこと。）
+
 **`OPENROUTER_API_KEY` は今すぐ設定しない。** allowlist の防御が実機で
 本当に効いていることを確認してから設定する（下のチェックリストC節、
 手順9・10・11が通った後）。理由はチェックリストのA節末尾に書いてある。
@@ -101,18 +106,37 @@ Supabase ダッシュボードの **Project Settings → Edge Functions → Secr
 キーは Edge Function の Secret にのみ置かれ、フロントのコード・ログ・
 レスポンスには一切出力されない。
 
-### 3. Edge Function をデプロイする
+### 3. Edge Function をデプロイする（GitHub Actions 経由）
 
-Supabase CLI が使える環境（Docker不要、`npx supabase` で動く）から:
+ローカル環境も Supabase CLI も持たない前提のため、デプロイは
+`.github/workflows/deploy-functions.yml` が代行する。
+`main` への push で `supabase/functions/**` に変更があったときに自動実行
+されるほか、Actions タブから **workflow_dispatch で手動実行**もできる。
+デプロイの前に `deno test frontend/ supabase/functions/_shared/` を実行し、
+1つでも失敗したらデプロイに進まない。
+
+このワークフローが使う Secrets は、**Supabase 側の Secrets とは別物**で、
+**GitHub リポジトリの Secrets**（Settings → Secrets and variables →
+Actions → New repository secret）に登録する。
+
+| GitHub Secret 名        | 内容                                    | 取得場所                                                        |
+| ------------------------ | --------------------------------------- | ----------------------------------------------------------------- |
+| `SUPABASE_ACCESS_TOKEN`  | Supabase CLI をCIから認証させるトークン | Supabase ダッシュボード → 右上のアカウントメニュー → **Access Tokens** → Generate new token |
+| `SUPABASE_PROJECT_REF`   | どのSupabaseプロジェクトにデプロイするか | Supabase ダッシュボード → **Project Settings → General** → Reference ID |
+
+このワークフローは `OPENROUTER_API_KEY` を一切設定しない。それは
+Edge Function 自体の実行時Secret（Supabaseダッシュボード側）であり、
+下のチェックリストC節まで待って別途設定する、別の話。
+
+手動でデプロイしたい場合（CLIが使える環境があれば）は、代わりに:
 
 ```
-supabase link --project-ref <あなたのプロジェクトref>
-supabase functions deploy quota
-supabase functions deploy run
+supabase functions deploy quota --project-ref <あなたのプロジェクトref>
+supabase functions deploy run --project-ref <あなたのプロジェクトref>
 ```
 
-ローカル環境が無い場合は、Supabase ダッシュボードの **Edge Functions** 画面
-から直接コードを貼り付けてデプロイすることもできる
+または Supabase ダッシュボードの **Edge Functions** 画面から直接コードを
+貼り付けてデプロイすることもできる
 （`supabase/functions/quota/index.ts` と `supabase/functions/run/index.ts`、
 および両方が import する `_shared/` 配下一式が必要）。
 

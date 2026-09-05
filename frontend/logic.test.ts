@@ -8,7 +8,45 @@ import {
   interpretRunResponse,
   mapErrorMessage,
   stripBossEntry,
+  validateSupabaseUrl,
 } from "./logic.js";
+
+// ---------------------------------------------------------------------------
+// validateSupabaseUrl: config.js の supabaseUrl の形式検証
+// ---------------------------------------------------------------------------
+
+Deno.test("validateSupabaseUrl: 素のプロジェクトURLは通る", () => {
+  assertEquals(validateSupabaseUrl("https://x.supabase.co"), "https://x.supabase.co");
+});
+
+Deno.test("validateSupabaseUrl: /rest/v1/ 付きは弾かれる", () => {
+  assertThrows(() => validateSupabaseUrl("https://x.supabase.co/rest/v1/"));
+});
+
+Deno.test("validateSupabaseUrl: /rest/v1（末尾スラッシュ無し）も弾かれる", () => {
+  assertThrows(() => validateSupabaseUrl("https://x.supabase.co/rest/v1"));
+});
+
+Deno.test("validateSupabaseUrl: /auth/v1 や /functions/v1 も弾かれる", () => {
+  assertThrows(() => validateSupabaseUrl("https://x.supabase.co/auth/v1"));
+  assertThrows(() => validateSupabaseUrl("https://x.supabase.co/functions/v1"));
+});
+
+Deno.test("validateSupabaseUrl: 末尾スラッシュのみは弾かれずに正規化される", () => {
+  assertEquals(validateSupabaseUrl("https://x.supabase.co/"), "https://x.supabase.co");
+});
+
+Deno.test("validateSupabaseUrl: 空文字/未設定は弾かれる", () => {
+  assertThrows(() => validateSupabaseUrl(""));
+  assertThrows(() => validateSupabaseUrl(undefined as unknown as string));
+});
+
+Deno.test("validateSupabaseUrl: 正規化後にfunctions/v1を連結しても二重スラッシュにならない", () => {
+  const normalized = validateSupabaseUrl("https://x.supabase.co/");
+  const functionsBase = `${normalized}/functions/v1`;
+  assertEquals(functionsBase, "https://x.supabase.co/functions/v1");
+  assert(!functionsBase.includes("//functions"));
+});
 
 // ---------------------------------------------------------------------------
 // buildRunBody: before/after を常に含める

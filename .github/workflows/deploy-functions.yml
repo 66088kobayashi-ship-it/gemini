@@ -1,0 +1,63 @@
+name: Deploy Supabase Edge Functions
+
+# iPad + GitHub Web UI + 各ダッシュボードだけで運用する前提のため、
+# Edge Function のデプロイはこのワークフロー経由で行う
+# （ローカル環境・Supabase CLI をローカルに入れる必要はない）。
+#
+# 必要な Secrets（Settings → Secrets and variables → Actions で登録）:
+#   - SUPABASE_ACCESS_TOKEN : Supabase ダッシュボード
+#                             Account → Access Tokens で発行したトークン
+#   - SUPABASE_PROJECT_REF  : Supabase ダッシュボード
+#                             Project Settings → General の Reference ID
+#
+# OPENROUTER_API_KEY はここでは設定しない。デプロイ前チェックリストのC節
+# （allowlist の防御を実機で確認した後）まで待つこと。
+# このワークフローは Edge Function のコードをデプロイするだけで、
+# OPENROUTER_API_KEY のようなアプリ側の Secret には一切触れない。
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "supabase/functions/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # 壊れたコードを本番にデプロイしないため、テストが1つでも失敗したら
+      # ここでジョブが止まり、以降のデプロイ手順には進まない。
+      - name: Run tests
+        run: deno test frontend/ supabase/functions/_shared/
+
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # --project-ref を渡すので事前の `supabase link` は不要。
+      # SUPABASE_PROJECT_REF・SUPABASE_ACCESS_TOKEN は GitHub Secrets 経由の
+      # ${{ secrets.* }} 参照のみで扱い、実行ログには自動でマスクされる。
+      # echo 等で値を直接出力する処理はどこにも入れていない。
+      - name: Deploy quota function
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy quota --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+      - name: Deploy run function
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy run --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"

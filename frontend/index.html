@@ -287,7 +287,22 @@ import {
   interpretRunResponse,
   mapErrorMessage,
   stripBossEntry,
+  validateSupabaseUrl,
 } from "./logic.js";
+
+// config.js の supabaseUrl にサブパス（/rest/v1 等）や設定漏れがあると、
+// supabase-js や /functions/v1 の呼び出し先URLが無言で壊れる。
+// 起動時に検証し、壊れていれば分かる形で止める（実際に一度、
+// /rest/v1/ が混入したまま気づかずデプロイされたことがあるため）。
+let SUPABASE_URL;
+try {
+  SUPABASE_URL = validateSupabaseUrl(window.YUI_CONFIG?.supabaseUrl);
+} catch (e) {
+  document.body.innerHTML =
+    `<div style="padding:24px;color:var(--paper);font-family:inherit">` +
+    `設定エラー: ${e.message}</div>`;
+  throw e;
+}
 
 // ---------------------------------------------------------------------------
 // 役の色・アイコンは役に紐付く（変わらない）。model/display はモデルに紐付き、
@@ -495,8 +510,8 @@ sendBtn.onclick=start;
 // ---------------------------------------------------------------------------
 // Supabase 認証（マジックリンクのみ）
 // ---------------------------------------------------------------------------
-const supabase = createClient(window.YUI_CONFIG.supabaseUrl, window.YUI_CONFIG.supabaseAnonKey);
-const FUNCTIONS_BASE = `${window.YUI_CONFIG.supabaseUrl}/functions/v1`;
+const supabase = createClient(SUPABASE_URL, window.YUI_CONFIG.supabaseAnonKey);
+const FUNCTIONS_BASE = `${SUPABASE_URL}/functions/v1`;
 
 const gateEmail=$('gateEmail'), gateSend=$('gateSend'), gateVerdict=$('gateVerdict');
 let resendTimer=null;
