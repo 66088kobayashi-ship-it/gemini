@@ -17,8 +17,12 @@ window.YUI_CONFIG = {
   // 紐付いているので、ここを差し替えても輪の見た目は壊れない。
   // 上書きする場合、model と display は必ず同時に書き換えること
   // （display を書き忘れると undefined になり、その場で気づける）。
-  // OpenRouter の無料モデルの一覧・実在するIDは https://openrouter.ai/models で
-  // 都度確認すること（掲載モデルは入れ替わる）。
+  //
+  // index.html の DEFAULT_MODEL_CONFIG が既定値だが、無料モデルの一覧は
+  // 入れ替わる（2026-09-05 時点で既定の2モデルが実際に無くなっていたことを
+  // 確認済み）。index.html を書き換えなくても、ここで上書きすれば
+  // 差し替えられる。次に消えたときはまずここを直す。
+  // 実在するIDは https://openrouter.ai/models で都度確認すること。
   models: {
     // propose: { model: "openrouter/xxx:free", display: "実際のモデル名（無料枠）" },
   },

@@ -313,12 +313,16 @@ try {
 // config.js から差し替えられる。無料枠の間は display に実際のモデル名を入れる
 // ことで、表示が嘘にならないようにする。
 // ---------------------------------------------------------------------------
+// 無料モデルの一覧は入れ替わる。以前ここに置いていた2つのIDは実在しなく
+// なっていたことが確認された（2026-09-05）。デプロイ前チェックリストで
+// https://openrouter.ai/models の現存確認を必ず行うこと。
+// 検収は批判と同じモデルにしない（批判の指摘をそのまま追認しやすくなるため）。
 const DEFAULT_MODEL_CONFIG = {
-  propose:  { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
-  critic:   { model: "google/gemini-2.0-flash-exp:free",       display: "Gemini 2.0 Flash Exp（無料枠）" },
-  check:    { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
-  research: { model: "google/gemini-2.0-flash-exp:free",       display: "Gemini 2.0 Flash Exp（無料枠）" },
-  digest:   { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
+  propose:  { model: "nvidia/nemotron-3-ultra-550b-a55b:free", display: "Nemotron 3 Ultra" },
+  critic:   { model: "minimax/minimax-m3:free",                display: "MiniMax M3" },
+  check:    { model: "poolside/laguna-s-2.1:free",             display: "Laguna S 2.1" },
+  research: { model: "nvidia/nemotron-3-ultra-550b-a55b:free", display: "Nemotron 3 Ultra" },
+  digest:   { model: "minimax/minimax-m3:free",                display: "MiniMax M3" },
 };
 const MODEL_CONFIG = applyModelConfig(DEFAULT_MODEL_CONFIG, window.YUI_CONFIG?.models);
 

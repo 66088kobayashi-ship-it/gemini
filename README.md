@@ -60,6 +60,44 @@ supabase/
   `instruction` が同じ system prompt に同居すると判定基準が濁るリスクが
   ある。**実測で実害が確認できるまではこの変更を入れない。**
 
+## 既知の限界
+
+### `frontend/index.html` のインラインスクリプトは自動テストの対象外
+
+`frontend/logic.js` の純粋関数（`buildRunBody` / `composeRunRequest` /
+`validateSupabaseUrl` / `buildRedirectTo` / `mapOAuthError` 等）は
+`deno test` で検証しているが、それを実際に呼び出す
+`index.html` の `<script type="module">` 側の配線コードそのものは、
+ブラウザでしか実行できないため自動テストの対象に入っていない。
+
+この構造（純粋関数はテスト済みだが、それを呼ぶ配線は未テスト）は、
+このプロジェクトで**既に2回バグを生んでいる**:
+
+- 指示欄に打った文字列が `/run` に渡っておらず、モデルに一切届いていなかった
+  （`buildRunBody` 自体は正しくテストされていたが、`index.html` 側が
+  引数を渡し忘れていた）
+- `OPENROUTER_API_KEY` の有無チェックが `run/index.ts` の
+  `Deno.serve` コールバックの中、JWT検証・allowlist照合より前にあった
+  （`handleRun` 自体は正しくテストされていたが、それを呼ぶ外側の
+  エントリポイントは未テストだった）
+
+後者は `supabase/functions/run/handler.ts` への切り出しで解決済み
+（`Deno.serve` を薄いラッパーにし、本体を named export にしてテストする）。
+**`frontend/index.html` にも同じ対処（配線部分を `frontend/app.js` 等に
+切り出し、DOM操作以外の呼び出し順序をテストする）が可能なはずだが、
+今は実施しない。** 実機確認を優先するため、ここでは将来の課題として
+記録するだけにとどめる。
+
+### モデルIDは静的サイトなので「環境変数」ではなく `config.js` で上書きする
+
+フロントはビルドステップを持たない静的サイトのため、サーバーサイドの
+Edge Function（`DAILY_QUOTA` / `CONTEXT_WINDOW` / `OPENROUTER_API_KEY`）
+のような実行時環境変数は存在しない。モデルIDを「コードを触らず差し替え
+られる」ようにする実質的な等価物は `frontend/config.js` の `models`
+フィールドで、これは `index.html` の `DEFAULT_MODEL_CONFIG` を
+`applyModelConfig()` で上書きする形で既に機能している
+（`logic.test.ts` でテスト済み）。
+
 ## セットアップ手順書
 
 **iPad の GitHub Web UI と Supabase のダッシュボードだけで完結する。**
@@ -257,8 +295,16 @@ anon key は `config.js` 経由でブラウザに公開される（設計通り�
 
 - [ ] 12. https://openrouter.ai/models で、既定モデルID（`frontend/index.html`
       の `DEFAULT_MODEL_CONFIG`、`:free` 付き）が現存するか確認した。
-      無料枠カタログは入れ替わるため、無くなっていたら
-      `frontend/config.js` の `models` で存命のモデルに上書きする
+      **無料枠カタログは実際に入れ替わる**（2026-09-05、最初に置いていた
+      2つの既定モデルIDが両方とも実在しなくなっていたことを確認済み。
+      現在の既定は `nvidia/nemotron-3-ultra-550b-a55b:free` /
+      `minimax/minimax-m3:free` / `poolside/laguna-s-2.1:free`だが、
+      これもいずれ入れ替わりうる前提でその都度確認すること）。
+      **`/run` が404を返したら、まずモデルIDが消えていないかを疑う。**
+      無くなっていたら `index.html` を触らず、`frontend/config.js` の
+      `models` で存命のモデルに上書きする（`model` と `display` は必ず
+      ペアで書き換える。`display` だけ古い名前を残すと、無料モデルの
+      出力を見ているのに違うモデルの名前で表示されることになる）
 - [ ] 13. Edge Function の Secret に `OPENROUTER_API_KEY` を設定した
 
 ### D. 実行の確認（ここから消費が発生する）

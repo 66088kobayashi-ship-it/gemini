@@ -356,6 +356,22 @@ Deno.test("applyModelConfig: modelだけ変えてdisplayを書き忘れても、
   );
 });
 
+Deno.test("applyModelConfig: 無料モデルが消えたときのconfig.js上書きシナリオ", () => {
+  // 実際にあった状況を模す: 既定モデルがOpenRouterから無くなったので、
+  // index.htmlを触らずconfig.jsのmodelsだけで差し替える。
+  const defaults = {
+    propose: { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
+  };
+  const overrides = {
+    propose: { model: "nvidia/nemotron-3-ultra-550b-a55b:free", display: "Nemotron 3 Ultra" },
+  };
+  const merged = applyModelConfig(defaults, overrides);
+  assertEquals(merged.propose.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
+  assertEquals(merged.propose.display, "Nemotron 3 Ultra");
+  assert(merged.propose.display !== defaults.propose.display);
+  assert(!merged.propose.display.includes("Llama"), "消えたモデルの表示名が残っている");
+});
+
 // ---------------------------------------------------------------------------
 // groupByLap
 // ---------------------------------------------------------------------------
