@@ -1,15 +1,22 @@
-import { assert, assertEquals, assertThrows } from "../supabase/functions/_shared/test_util.ts";
+import { assert, assertEquals, assertNotEquals, assertThrows } from "../supabase/functions/_shared/test_util.ts";
 import {
   applyModelConfig,
+  buildRedirectTo,
   buildRunBody,
   canSubmit,
   composeRunRequest,
+  extractOAuthErrorText,
   groupByLap,
   interpretRunResponse,
   mapErrorMessage,
+  mapOAuthError,
   stripBossEntry,
   validateSupabaseUrl,
 } from "./logic.js";
+
+// 既存のマジックリンクのエラー文言（index.html に直書き、壊していないことの
+// 比較対象として使う。マジックリンクの経路自体は変更していない）。
+const MAGIC_LINK_ERROR_TEXT = "送信できなかった。もう一度試す";
 
 // ---------------------------------------------------------------------------
 // validateSupabaseUrl: config.js の supabaseUrl の形式検証
@@ -46,6 +53,77 @@ Deno.test("validateSupabaseUrl: 正規化後にfunctions/v1を連結しても二
   const functionsBase = `${normalized}/functions/v1`;
   assertEquals(functionsBase, "https://x.supabase.co/functions/v1");
   assert(!functionsBase.includes("//functions"));
+});
+
+// ---------------------------------------------------------------------------
+// buildRedirectTo: Google/マジックリンク共通のredirectTo組み立て
+// ---------------------------------------------------------------------------
+
+Deno.test("buildRedirectTo: config.jsのappUrlがそのまま使われる（ハードコードではない）", () => {
+  const url = "https://66088kobayashi-ship-it.github.io/gemini/frontend/";
+  assertEquals(
+    buildRedirectTo(url),
+    "https://66088kobayashi-ship-it.github.io/gemini/frontend",
+  );
+});
+
+Deno.test("buildRedirectTo: 末尾スラッシュを正規化し、連結しても二重スラッシュにならない", () => {
+  const normalized = buildRedirectTo("https://example.github.io/app/");
+  assertEquals(normalized, "https://example.github.io/app");
+  const concatenated = `${normalized}/callback`;
+  assert(!concatenated.includes("//callback"));
+});
+
+Deno.test("buildRedirectTo: 空/未設定は例外になる", () => {
+  assertThrows(() => buildRedirectTo(""));
+  assertThrows(() => buildRedirectTo(undefined as unknown as string));
+});
+
+// ---------------------------------------------------------------------------
+// OAuth エラー: マジックリンクとは別の文言にマップされる
+// ---------------------------------------------------------------------------
+
+Deno.test("extractOAuthErrorText: ハッシュフラグメントからerror/descriptionを取り出す", () => {
+  const text = extractOAuthErrorText("", "#error=access_denied&error_description=User%20denied");
+  assertEquals(text, "access_denied: User denied");
+});
+
+Deno.test("extractOAuthErrorText: クエリ文字列からも取り出せる", () => {
+  const text = extractOAuthErrorText("?error=server_error", "");
+  assertEquals(text, "server_error");
+});
+
+Deno.test("extractOAuthErrorText: エラーが無ければnull", () => {
+  assertEquals(extractOAuthErrorText("", ""), null);
+  assertEquals(extractOAuthErrorText("?foo=bar", "#baz=qux"), null);
+});
+
+Deno.test("mapOAuthError: キャンセルは専用の文言になる", () => {
+  const msg = mapOAuthError("access_denied: User denied access");
+  assert(msg.includes("キャンセル"));
+});
+
+Deno.test("mapOAuthError: プロバイダ未設定は専用の文言になる", () => {
+  const msg = mapOAuthError("Unsupported provider: provider is not enabled");
+  assert(msg.includes("有効になっていない"));
+});
+
+Deno.test("mapOAuthError: リダイレクト不一致は専用の文言になる", () => {
+  const msg = mapOAuthError("redirect_uri_mismatch");
+  assert(msg.includes("リダイレクト"));
+});
+
+Deno.test("mapOAuthError: マジックリンクのエラー文言とは別の文言になる", () => {
+  const cases = [
+    "access_denied",
+    "Unsupported provider: provider is not enabled",
+    "redirect_uri_mismatch",
+    "unknown_error",
+    "",
+  ];
+  for (const c of cases) {
+    assertNotEquals(mapOAuthError(c), MAGIC_LINK_ERROR_TEXT);
+  }
 });
 
 // ---------------------------------------------------------------------------

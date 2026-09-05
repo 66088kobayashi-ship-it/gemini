@@ -4,6 +4,16 @@
 
 const KNOWN_SUPABASE_SUBPATHS = ["/rest/v1", "/auth/v1", "/functions/v1", "/storage/v1", "/realtime/v1"];
 
+/** 末尾スラッシュを取り除くだけの共通正規化。空文字/未設定は例外にする。
+ * validateSupabaseUrl と buildRedirectTo の両方がこれを使うことで、
+ * どちらも `${url}/xxx` の形で連結したときに二重スラッシュを作らない。 */
+function normalizeUrl(url, label) {
+  if (typeof url !== "string" || url.trim().length === 0) {
+    throw new Error(`${label} が設定されていません`);
+  }
+  return url.replace(/\/+$/, "");
+}
+
 /**
  * config.js の supabaseUrl を検証・正規化する。
  *
@@ -25,10 +35,7 @@ const KNOWN_SUPABASE_SUBPATHS = ["/rest/v1", "/auth/v1", "/functions/v1", "/stor
  * @returns {string} 末尾スラッシュを除いた正規化済みURL
  */
 export function validateSupabaseUrl(url) {
-  if (typeof url !== "string" || url.trim().length === 0) {
-    throw new Error("config.js の supabaseUrl が設定されていません");
-  }
-  const normalized = url.replace(/\/+$/, "");
+  const normalized = normalizeUrl(url, "config.js の supabaseUrl");
   const lower = normalized.toLowerCase();
   for (const sub of KNOWN_SUPABASE_SUBPATHS) {
     if (lower.endsWith(sub)) {
@@ -41,6 +48,58 @@ export function validateSupabaseUrl(url) {
     }
   }
   return normalized;
+}
+
+/**
+ * マジックリンク／Google OAuth 共通の redirectTo を組み立てる。
+ * config.js の appUrl（またはフォールバック値）を渡す。ハードコードしない。
+ * validateSupabaseUrl と同じ正規化（末尾スラッシュ除去）を使うことで、
+ * 呼び出し側が将来これに何かを連結しても二重スラッシュにならない。
+ * @param {string} appUrl
+ * @returns {string}
+ */
+export function buildRedirectTo(appUrl) {
+  return normalizeUrl(appUrl, "アプリのURL");
+}
+
+/**
+ * Supabase Auth の OAuth リダイレクト先に付与されるエラー情報を取り出す。
+ * 失敗時、Supabase はクエリ文字列またはハッシュフラグメントに
+ * error / error_description を付けてリダイレクトしてくる。
+ * @param {string} search location.search（例: "?error=access_denied"）
+ * @param {string} hash location.hash（例: "#error=server_error&error_description=..."）
+ * @returns {string | null} "error: description" 形式の生テキスト。無ければ null
+ */
+export function extractOAuthErrorText(search, hash) {
+  const hashParams = new URLSearchParams(String(hash || "").replace(/^#/, ""));
+  const searchParams = new URLSearchParams(String(search || "").replace(/^\?/, ""));
+  const error = hashParams.get("error") || searchParams.get("error");
+  if (!error) return null;
+  const description = hashParams.get("error_description") || searchParams.get("error_description") || "";
+  return description ? `${error}: ${description}` : error;
+}
+
+/**
+ * OAuthのエラー（signInWithOAuth() 自体の error.message、または
+ * extractOAuthErrorText() が返した文字列）を画面文言に変換する。
+ * マジックリンクのエラー文言（"送信できなかった。もう一度試す"）とは
+ * 別の文言にする。原因が別（Google側の問題）であることが分かるように。
+ * @param {string} rawMessage
+ * @returns {string}
+ */
+export function mapOAuthError(rawMessage) {
+  const text = String(rawMessage || "").toLowerCase();
+  if (!text) return "Googleログインに失敗した";
+  if (text.includes("access_denied") || text.includes("cancel")) {
+    return "Googleログインがキャンセルされた";
+  }
+  if (text.includes("redirect")) {
+    return "リダイレクト先の設定が正しくない（Supabase側のRedirect URLsを確認してほしい）";
+  }
+  if (text.includes("provider") || text.includes("not enabled") || text.includes("unsupported")) {
+    return "Googleログインが有効になっていない";
+  }
+  return `Googleログインに失敗した（${rawMessage}）`;
 }
 
 /** POST /run のボディを組み立てる。plan.before / plan.after が未指定でも
