@@ -29,8 +29,14 @@ supabase/
       supabase_adapters.test.ts
       cors.ts
       test_util.ts                 # 自前の最小アサーション（外部依存なし）
-    quota/index.ts                 # GET /quota のエントリポイント
-    run/index.ts                   # POST /run のエントリポイント
+    quota/
+      index.ts                     # Deno.serve を呼ぶだけの薄いラッパー
+      handler.ts                   # GET /quota の実体（依存注入でテスト可能）
+      handler.test.ts
+    run/
+      index.ts                     # Deno.serve を呼ぶだけの薄いラッパー
+      handler.ts                   # POST /run の実体（依存注入でテスト可能）
+      handler.test.ts
 ```
 
 依存は Supabase クライアント（`@supabase/supabase-js`）以外に一切追加していない。
@@ -264,6 +270,11 @@ anon key は `config.js` 経由でブラウザに公開される（設計通り�
 - [x] クライアントが偽の消費回数を送っても、サーバー側の再計算が使われること
       （検証済み）
 - [x] 加算(`persistRun`)が失敗したとき、黙って200を返さないこと（検証済み）
+- [x] `OPENROUTER_API_KEY` が未設定の環境でも、JWTなし/allowlist外/
+      criteria空/instruction空/残量不足のいずれも、正しいステータス
+      （401/403/400/400/409）で拒否され、500にならないこと
+      （`run/handler.test.ts` で検証済み。エントリポイント層
+      `Deno.serve` のコールバックまで含めて検証している）
 
 ## 手順17の判定基準
 
@@ -344,6 +355,18 @@ deno test frontend/ supabase/functions/_shared/
 - `/run` の処理順は「JWT検証 → allowlist照合 → criteria/instruction検証 →
   消費回数のサーバー側再計算 → 残量チェック → 実行 → 加算・記録」。
   クライアントの申告値は一切使わない。
+  **エントリポイント（`Deno.serve` のコールバック）には判定ロジックを
+  置かない。置く場合は必ずテストする。認証・認可より前に分岐点を作らない。**
+  （実際に一度、`run/index.ts` が `OPENROUTER_API_KEY` の有無を
+  `handleRun` の呼び出しより前でチェックしており、これが
+  JWT検証・allowlist照合より先に実行される「第二の入場チェック」になって
+  いた。`http_handlers.test.ts` は`handleRun`を直接呼ぶため、その外側の
+  `Deno.serve`コールバックを一度も検証しておらず、83本すべて緑のまま
+  この穴を見逃していた。以降、`run/index.ts`・`quota/index.ts`は
+  `Deno.serve`を呼ぶだけの薄いラッパーとし、判定を含む本体は同ディレクトリの
+  `handler.ts`に切り出してネットワーク無しでテストする。OpenRouterの
+  キーは、`handleRun`がJWT/allowlist/criteria/instruction/残量の
+  すべてを通過し、実際にモデルを呼ぶ直前まで遅延評価する。）
 - 使用量の加算（`usage`）と実行記録（`runs`）は、Postgresの `record_run()`
   という単一のSQL文でアトミックに行う。Edge Function 側は read-then-write
   に分解しない。加算に失敗したら黙って200を返さず、207で明示する。
