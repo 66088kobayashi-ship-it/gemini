@@ -2,10 +2,11 @@
 // OPENROUTER_API_KEY が「未設定」の環境を模して、Deno.serve コールバック
 // （handleRunRequest）を直接呼ぶ。JWT/allowlist/criteria/instruction/残量の
 // 判定が、OpenRouterキーの有無より必ず先に効くことを検証する。
-import { assert, assertEquals } from "../_shared/test_util.ts";
+import { assert, assertEquals, assertNotEquals } from "../_shared/test_util.ts";
 import { handleRunRequest, RunDeps } from "./handler.ts";
 import { AuthContext } from "../_shared/http_handlers.ts";
 import { CallModelFn, Plan } from "../_shared/engine.ts";
+import { InsufficientBalanceError, RateLimitedError } from "../_shared/openrouter.ts";
 
 const OK_AUTH: AuthContext = { userId: "user-1", email: "ok@example.com" };
 const NO_KEY_ENV = (_name: string): string | undefined => undefined;
@@ -146,4 +147,43 @@ Deno.test("handleRunRequest: キーが設定されていれば正常系はその
   assertEquals(res.status, 200);
   assertEquals(body.callsActual, 2);
   assertEquals(persisted.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// RateLimitedError(429) は 500 に丸めず、402/404/401とは別のステータスで返す
+// ---------------------------------------------------------------------------
+
+Deno.test("handleRunRequest: RateLimitedErrorは500ではなく429で返る", async () => {
+  const callModel: CallModelFn = async () => {
+    throw new RateLimitedError("OpenRouterが混み合っている");
+  };
+  const deps = baseDeps({ callModel });
+  const res = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), deps);
+  assertEquals(res.status, 429);
+  const body = await res.json();
+  assert(String(body.error).length > 0);
+});
+
+Deno.test("handleRunRequest: 429/402/401はすべて別のステータスになる", async () => {
+  const rateLimitedDeps = baseDeps({
+    callModel: async () => {
+      throw new RateLimitedError();
+    },
+  });
+  const balanceDeps = baseDeps({
+    callModel: async () => {
+      throw new InsufficientBalanceError();
+    },
+  });
+  const noAuthDeps = baseDeps({ verifyJwt: async () => null });
+
+  const rateLimited = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), rateLimitedDeps);
+  const balance = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), balanceDeps);
+  const noAuth = await handleRunRequest(makeRequest(makePlanBody(), null), noAuthDeps);
+
+  assertEquals(rateLimited.status, 429);
+  assertEquals(balance.status, 402);
+  assertEquals(noAuth.status, 401);
+  assertNotEquals(rateLimited.status, balance.status);
+  assertNotEquals(rateLimited.status, noAuth.status);
 });

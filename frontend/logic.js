@@ -192,6 +192,8 @@ export function mapErrorMessage(status, body) {
     }
     case 402:
       return "OpenRouterの残高が尽きた";
+    case 429:
+      return "いま混んでいる。少し待って再試行してほしい";
     case 0:
       return "つながらなかった。もう一度試す";
     default:
