@@ -7,6 +7,12 @@ window.YUI_CONFIG = {
   supabaseUrl: "https://rkhljqhrlvcmbhhmykvq.supabase.co",
   supabaseAnonKey: "sb_publishable_NqWIHzQsgEk31Uq_X6LaCA_e83jUbCP",
 
+  // マジックリンク・Google OAuth 共通の戻り先URL。GitHub Pages の公開URL
+  // （末尾スラッシュは自動で正規化される）。未設定でも今アクセスしている
+  // URLにフォールバックするが、Google OAuthはSupabase側のRedirect URLsと
+  // 完全一致している必要があるため、明示しておくのが安全。
+  appUrl: "https://66088kobayashi-ship-it.github.io/gemini/frontend/",
+
   // 無料枠の間の既定モデル。役の色・アイコンは役（propose/critic/...）に
   // 紐付いているので、ここを差し替えても輪の見た目は壊れない。
   // 上書きする場合、model と display は必ず同時に書き換えること

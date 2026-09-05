@@ -154,12 +154,17 @@ supabase functions deploy run --project-ref <あなたのプロジェクトref>
 window.YUI_CONFIG = {
   supabaseUrl: "https://xxxxxxxx.supabase.co",   // Project Settings → API → Project URL
   supabaseAnonKey: "ey...",                       // Project Settings → API → anon public
+  appUrl: "https://<user>.github.io/<repo>/frontend/", // マジックリンク/Google共通の戻り先
   models: {
     // 有料に切り替えるときは model と display を必ず同時に書き換える
     // propose: { model: "anthropic/claude-sonnet-5", display: "Claude Sonnet 5" },
   },
 };
 ```
+
+`appUrl` は未設定でも今アクセスしているURLに自動でフォールバックするが、
+Google OAuthはSupabase側の Redirect URLs と完全一致している必要があるため、
+明示しておくのが安全。
 
 **`supabaseAnonKey` には必ず「anon / public」キーを入れる。「service_role」
 キーを絶対に入れないこと。** 両者の違い: `anon` キーは RLS
@@ -190,6 +195,24 @@ Supabase ダッシュボードの **Authentication → URL Configuration** で:
 - **Site URL**: `https://<ユーザー名>.github.io/<リポジトリ名>/frontend/`
 - **Redirect URLs**: 同じURLを追加登録する
   （末尾のスラッシュあり・なし両方を念のため登録しておくと安全）
+
+この設定は Google OAuth のリダイレクト先にもそのまま使われる
+（`frontend/config.js` の `appUrl` を参照）。
+
+### 7. ログイン方法（Google が主、メールが従）
+
+Google が主、メールアドレスのマジックリンクが従の2つのログイン方法がある。
+**両方とも同じJWTを発行するので、サーバー側（`handleRun`・allowlist・RLS）は
+どちらでログインしたかを区別しない。**
+
+- **Google**: Supabase ダッシュボードの **Authentication → Providers → Google**
+  で Client ID / Secret を登録し有効化しておく（本READMEの対象外。
+  Google Cloud Console 側でのOAuthクライアント作成を含む）。
+- **マジックリンク**: Supabase 組み込みメールを使う。**プロジェクト全体で
+  1時間あたり2通、かつプロジェクトのチームメンバーのアドレスにしか
+  届かない**という制約がある。実機確認で詰まりやすいのはこちらなので、
+  Google が使えるならそちらを優先する。allowlist に別アドレスを足す
+  ときや、Googleが使えない環境向けの経路として残してある。
 
 ## デプロイ・実機確認チェックリスト
 

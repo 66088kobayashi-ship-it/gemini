@@ -214,7 +214,8 @@ body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;p
   <section class="view" id="gate" aria-label="ログイン">
     <div class="bar"><div class="mark">結</div></div>
     <div class="dock">
-      <input class="criteria" id="gateEmail" type="email" placeholder="メールアドレス" autocomplete="email" inputmode="email">
+      <button class="run" id="googleSend">Google で続ける</button>
+      <input class="criteria" id="gateEmail" type="email" placeholder="メールアドレス" autocomplete="email" inputmode="email" style="margin-top:var(--s2)">
       <div class="runrow">
         <div class="verdict" id="gateVerdict">メールアドレスを送ると、ログイン用のリンクが届く</div>
         <button class="run" id="gateSend">送る</button>
@@ -281,11 +282,14 @@ body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;p
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   applyModelConfig,
+  buildRedirectTo,
   canSubmit,
   composeRunRequest,
+  extractOAuthErrorText,
   groupByLap,
   interpretRunResponse,
   mapErrorMessage,
+  mapOAuthError,
   stripBossEntry,
   validateSupabaseUrl,
 } from "./logic.js";
@@ -508,12 +512,24 @@ promptEl.addEventListener('keydown',e=>{
 sendBtn.onclick=start;
 
 // ---------------------------------------------------------------------------
-// Supabase 認証（マジックリンクのみ）
+// Supabase 認証（Google が主、マジックリンクが従。同じJWTになるので
+// サーバー側は経路によって分岐しない）
 // ---------------------------------------------------------------------------
 const supabase = createClient(SUPABASE_URL, window.YUI_CONFIG.supabaseAnonKey);
 const FUNCTIONS_BASE = `${SUPABASE_URL}/functions/v1`;
 
-const gateEmail=$('gateEmail'), gateSend=$('gateSend'), gateVerdict=$('gateVerdict');
+// redirectTo は config.js の appUrl から組み立てる（ハードコードしない）。
+// 未設定なら今アクセスしているURLをフォールバックにする。
+const APP_URL = (() => {
+  const fallback = window.location.origin + window.location.pathname;
+  try {
+    return buildRedirectTo(window.YUI_CONFIG?.appUrl || fallback);
+  } catch (e) {
+    return fallback;
+  }
+})();
+
+const gateEmail=$('gateEmail'), gateSend=$('gateSend'), gateVerdict=$('gateVerdict'), googleSend=$('googleSend');
 let resendTimer=null;
 
 function setScreen(name){ document.body.dataset.screen=name; }
@@ -541,7 +557,7 @@ async function sendMagicLink(){
   gateSend.disabled=true;
   const { error } = await supabase.auth.signInWithOtp({
     email,
-    options:{ emailRedirectTo: window.location.origin + window.location.pathname },
+    options:{ emailRedirectTo: APP_URL },
   });
   if(error){
     gateVerdict.textContent='送信できなかった。もう一度試す';
@@ -551,6 +567,30 @@ async function sendMagicLink(){
   startResendCooldown();
 }
 gateSend.onclick=sendMagicLink;
+
+async function signInWithGoogle(){
+  googleSend.disabled=true;
+  gateVerdict.textContent='Googleのログイン画面を開いている…';
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider:'google',
+    options:{ redirectTo: APP_URL },
+  });
+  if(error){
+    gateVerdict.textContent=mapOAuthError(error.message);
+    googleSend.disabled=false;
+  }
+  // 成功時はブラウザがGoogleへ離脱するので、ここから先の処理はない。
+}
+googleSend.onclick=signInWithGoogle;
+
+// OAuthが失敗してリダイレクトで戻ってきた場合、Supabaseはクエリ文字列か
+// ハッシュに error/error_description を付けてくる。黙って消さず表示する。
+(()=>{
+  const oauthErrorText = extractOAuthErrorText(window.location.search, window.location.hash);
+  if(oauthErrorText){
+    gateVerdict.textContent = mapOAuthError(oauthErrorText);
+  }
+})();
 
 async function handleUnauthorized(){
   await supabase.auth.signOut();
