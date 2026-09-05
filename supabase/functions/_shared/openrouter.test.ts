@@ -5,6 +5,7 @@ import {
   makeOpenRouterCaller,
   RateLimitedError,
   TruncatedResponseError,
+  UpstreamErrorResponse,
 } from "./openrouter.ts";
 import type { CallModelArgs } from "./engine.ts";
 
@@ -279,4 +280,120 @@ Deno.test("openrouter: RateLimitedErrorは402(残高不足)や5xxの汎用エラ
   assert(balance instanceof InsufficientBalanceError);
   assertNotEquals(rateLimited.constructor, balance.constructor);
   assertNotEquals(rateLimited.message, balance.message);
+});
+
+// ---------------------------------------------------------------------------
+// 200応答内のトップレベルerror: choices抽出より前に専用エラーとして検出する
+// ---------------------------------------------------------------------------
+
+Deno.test("openrouter: 200応答のトップレベルにerrorがあれば専用のUpstreamErrorResponseになる", async () => {
+  const fetchFn = async () =>
+    jsonRes(200, { error: { message: "上流プロバイダが失敗しました", code: "provider_error" } });
+  const call = makeOpenRouterCaller({ apiKey: SECRET_KEY, fetchFn, sleepFn: async () => {} });
+  let caught: unknown;
+  try {
+    await call(args());
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught instanceof UpstreamErrorResponse);
+  const err = caught as UpstreamErrorResponse;
+  assertEquals(err.upstreamMessage, "上流プロバイダが失敗しました");
+  assertEquals(err.code, "provider_error");
+  assert(err.message.includes("上流プロバイダが失敗しました"));
+  assert(err.message.includes("provider_error"));
+});
+
+Deno.test("openrouter: トップレベルのerrorはchoicesが無くても検出される（choices抽出より先）", async () => {
+  const fetchFn = async () => jsonRes(200, { error: { message: "失敗" }, choices: [] });
+  const call = makeOpenRouterCaller({ apiKey: SECRET_KEY, fetchFn, sleepFn: async () => {} });
+  let caught: unknown;
+  try {
+    await call(args());
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught instanceof UpstreamErrorResponse, "choicesが空でも、トップレベルerrorのほうを優先して検出するべき");
+});
+
+Deno.test("openrouter: UpstreamErrorResponseはEmptyResponseError/RateLimitedError/InsufficientBalanceErrorとは別の型になる", async () => {
+  const fetchFn = async () => jsonRes(200, { error: { message: "失敗", code: 500 } });
+  const call = makeOpenRouterCaller({ apiKey: SECRET_KEY, fetchFn, sleepFn: async () => {} });
+  let caught: unknown;
+  try {
+    await call(args());
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught instanceof UpstreamErrorResponse);
+  assert(!(caught instanceof EmptyResponseError));
+  assert(!(caught instanceof RateLimitedError));
+  assert(!(caught instanceof InsufficientBalanceError));
+});
+
+Deno.test("openrouter: トップレベルerrorの診断エラーにAPIキーが含まれない", async () => {
+  const fetchFn = async () =>
+    jsonRes(200, { error: { message: `キー流出テスト ${SECRET_KEY} 混入`, code: "x" } });
+  const call = makeOpenRouterCaller({ apiKey: SECRET_KEY, fetchFn, sleepFn: async () => {} });
+  // これは「上流のエラーメッセージにたまたまキーらしき文字列が混ざっていた」
+  // という想定ではなく、あくまでこの実装がキー自体を組み込んでいないことの
+  // 確認。実際にAuthorizationヘッダに使ったのと同じ値を含めても、
+  // 実装側が独自にキーを付加するような処理をしていないかを見る目的。
+  let caught: unknown;
+  try {
+    await call(args());
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught instanceof UpstreamErrorResponse);
+});
+
+// ---------------------------------------------------------------------------
+// choicesが空配列/欠落 と、choices[0].messageが空オブジェクト を区別する
+// ---------------------------------------------------------------------------
+
+Deno.test("openrouter: choicesが空配列だとchoicesEmpty=trueになる", async () => {
+  const fetchFn = async () => jsonRes(200, { choices: [] });
+  const call = makeOpenRouterCaller({ apiKey: SECRET_KEY, fetchFn, sleepFn: async () => {} });
+  let caught: unknown;
+  try {
+    await call(args());
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught instanceof EmptyResponseError);
+  const err = caught as EmptyResponseError;
+  assertEquals(err.choicesEmpty, true);
+  assertEquals(err.messageKeys, []);
+  assert(err.message.includes("choicesが空"));
+});
+
+Deno.test("openrouter: choicesキー自体が無くてもchoicesEmpty=trueになる", async () => {
+  const fetchFn = async () => jsonRes(200, {});
+  const call = makeOpenRouterCaller({ apiKey: SECRET_KEY, fetchFn, sleepFn: async () => {} });
+  let caught: unknown;
+  try {
+    await call(args());
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught instanceof EmptyResponseError);
+  assertEquals((caught as EmptyResponseError).choicesEmpty, true);
+});
+
+Deno.test("openrouter: choicesは存在するがmessageが空オブジェクトだとchoicesEmpty=falseで区別される", async () => {
+  const fetchFn = async () => jsonRes(200, { choices: [{ message: {}, finish_reason: "stop" }] });
+  const call = makeOpenRouterCaller({ apiKey: SECRET_KEY, fetchFn, sleepFn: async () => {} });
+  let caught: unknown;
+  try {
+    await call(args());
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught instanceof EmptyResponseError);
+  const err = caught as EmptyResponseError;
+  assertEquals(err.choicesEmpty, false, "choices[0]自体は存在するので、choices空とは区別されるべき");
+  assertEquals(err.messageKeys, []);
+  assert(err.message.includes("messageが空オブジェクト"));
+  assert(!err.message.includes("choicesが空"), "choices空のときの文言と混同してはいけない");
 });

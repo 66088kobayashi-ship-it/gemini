@@ -30,6 +30,28 @@ export interface ResponseDiagnostics {
   usage: unknown;
 }
 
+/** HTTP 200 のままボディのトップレベルに error を含めて返してくる場合がある
+ * （上流プロバイダ側の失敗などをOpenRouterがそのまま透過するケース）。
+ * choices抽出より前に検出し、専用のエラーにする。
+ * error.message / error.code のみを含める（キー・トークンはそもそもこの
+ * フィールドに含まれ得ない値なので、含めても漏えいにはならない）。 */
+export class UpstreamErrorResponse extends Error {
+  code: string | number | null;
+  upstreamMessage: string | null;
+  constructor(upstreamError: { message?: unknown; code?: unknown }) {
+    const upstreamMessage = typeof upstreamError?.message === "string" ? upstreamError.message : null;
+    const code = typeof upstreamError?.code === "string" || typeof upstreamError?.code === "number"
+      ? upstreamError.code
+      : null;
+    super(
+      `OpenRouterが200応答の中にエラーを含めました (code=${code}): ${upstreamMessage ?? "詳細不明"}`,
+    );
+    this.name = "UpstreamErrorResponse";
+    this.code = code;
+    this.upstreamMessage = upstreamMessage;
+  }
+}
+
 /** finish_reason === "length"（max_tokens不足で本文が出る前に打ち切られた）。
  * モデルの故障ではないので、空応答一般とは別のエラーにする。 */
 export class TruncatedResponseError extends Error {
@@ -55,12 +77,19 @@ export class EmptyResponseError extends Error {
   messageKeys: string[];
   usage: unknown;
   reasoningOnly: boolean;
-  constructor(d: ResponseDiagnostics & { reasoningOnly: boolean }) {
+  /** true: choices自体が空/欠落（モデルが選択肢を一つも返さなかった）。
+   * false: choices[0]は存在するが、その中のmessageが空オブジェクト等で
+   * content が取れなかった。原因が違うので区別できるようにする。 */
+  choicesEmpty: boolean;
+  constructor(d: ResponseDiagnostics & { reasoningOnly: boolean; choicesEmpty: boolean }) {
+    const choicesNote = d.choicesEmpty
+      ? "choicesが空でした（モデルが応答そのものを生成しませんでした）。"
+      : (d.messageKeys.length === 0 ? "messageが空オブジェクトでした。" : "");
     const reasoningNote = d.reasoningOnly
       ? "message.reasoningのみが返り、contentが空でした（推論モデルが本文を出していません）。"
       : "";
     super(
-      `OpenRouterの応答にcontentがありません。${reasoningNote}` +
+      `OpenRouterの応答にcontentがありません。${choicesNote}${reasoningNote}` +
         `finish_reason=${d.finishReason}, messageのキー=[${d.messageKeys.join(", ")}], ` +
         `usage=${JSON.stringify(d.usage)}`,
     );
@@ -69,6 +98,7 @@ export class EmptyResponseError extends Error {
     this.messageKeys = d.messageKeys;
     this.usage = d.usage;
     this.reasoningOnly = d.reasoningOnly;
+    this.choicesEmpty = d.choicesEmpty;
   }
 }
 
@@ -117,7 +147,16 @@ export function makeOpenRouterCaller(opts: OpenRouterOptions): CallModelFn {
 
       if (res.ok) {
         const data = await res.json();
+
+        // OpenRouterはHTTP 200のままボディのトップレベルにerrorを含めて返す
+        // ことがある（上流プロバイダ側の失敗を透過するケース）。choicesの
+        // 抽出より前に検出する。
+        if (data?.error) {
+          throw new UpstreamErrorResponse(data.error);
+        }
+
         const choice = data?.choices?.[0];
+        const choicesEmpty = !choice;
         const message = choice?.message ?? {};
         const finishReason: string | null = choice?.finish_reason ?? null;
         const usage = data?.usage ?? null;
@@ -133,7 +172,7 @@ export function makeOpenRouterCaller(opts: OpenRouterOptions): CallModelFn {
         }
 
         const reasoningOnly = typeof message.reasoning === "string" && message.reasoning.length > 0;
-        throw new EmptyResponseError({ finishReason, messageKeys, usage, reasoningOnly });
+        throw new EmptyResponseError({ finishReason, messageKeys, usage, reasoningOnly, choicesEmpty });
       }
 
       await res.body?.cancel().catch(() => {});

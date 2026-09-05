@@ -253,7 +253,7 @@ Deno.test("canSubmit: 条件を満たせば送信可", () => {
 // エラー文言: 401/403/400/409/402/207 がそれぞれ別の文言
 // ---------------------------------------------------------------------------
 
-Deno.test("エラー文言: 401/403/400/409/402/429/207 はすべて異なる文言になる", () => {
+Deno.test("エラー文言: 401/403/400/409/402/429/502/207 はすべて異なる文言になる", () => {
   const messages = new Set<string>();
   messages.add(mapErrorMessage(401, {}));
   messages.add(mapErrorMessage(403, {}));
@@ -261,6 +261,7 @@ Deno.test("エラー文言: 401/403/400/409/402/429/207 はすべて異なる文
   messages.add(mapErrorMessage(409, { needed: 9, remaining: 3 }));
   messages.add(mapErrorMessage(402, {}));
   messages.add(mapErrorMessage(429, {}));
+  messages.add(mapErrorMessage(502, {}));
   const partial = interpretRunResponse(207, {
     transcript: [],
     verdict: null,
@@ -270,7 +271,7 @@ Deno.test("エラー文言: 401/403/400/409/402/429/207 はすべて異なる文
   });
   assert(partial.kind === "partial");
   if (partial.kind === "partial") messages.add(partial.warning);
-  assertEquals(messages.size, 7, `重複がある: ${JSON.stringify([...messages])}`);
+  assertEquals(messages.size, 8, `重複がある: ${JSON.stringify([...messages])}`);
 });
 
 Deno.test("エラー文言: 429は「混雑・再試行」の趣旨で、402/404/401とは別の文言になる", () => {
@@ -279,6 +280,15 @@ Deno.test("エラー文言: 429は「混雑・再試行」の趣旨で、402/404
   assertNotEquals(rateLimited, mapErrorMessage(402, {}));
   assertNotEquals(rateLimited, mapErrorMessage(401, {}));
   assertNotEquals(rateLimited, mapErrorMessage(404, {}));
+});
+
+Deno.test("エラー文言: 502は「このモデルが応答を返さなかった」の趣旨で、次の一手（別のモデルを試す）が書かれている", () => {
+  const noResponse = mapErrorMessage(502, {});
+  assert(noResponse.includes("応答"));
+  assert(noResponse.includes("別のモデル") || noResponse.includes("モデルを試"), "何をすればいいか（別のモデルを試す）が書かれているべき");
+  assertNotEquals(noResponse, mapErrorMessage(429, {}));
+  assertNotEquals(noResponse, mapErrorMessage(402, {}));
+  assertNotEquals(noResponse, mapErrorMessage(404, {}));
 });
 
 Deno.test("エラー文言: 409は残り回数と不足回数を含む（既存文言と同じ形）", () => {
@@ -372,11 +382,11 @@ Deno.test("applyModelConfig: 無料モデルが消えたときのconfig.js上書
     propose: { model: "meta-llama/llama-3.3-70b-instruct:free", display: "Llama 3.3 70B Instruct（無料枠）" },
   };
   const overrides = {
-    propose: { model: "nvidia/nemotron-3-ultra-550b-a55b:free", display: "Nemotron 3 Ultra" },
+    propose: { model: "example-vendor/example-model:free", display: "Example Model（無料枠）" },
   };
   const merged = applyModelConfig(defaults, overrides);
-  assertEquals(merged.propose.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
-  assertEquals(merged.propose.display, "Nemotron 3 Ultra");
+  assertEquals(merged.propose.model, "example-vendor/example-model:free");
+  assertEquals(merged.propose.display, "Example Model（無料枠）");
   assert(merged.propose.display !== defaults.propose.display);
   assert(!merged.propose.display.includes("Llama"), "消えたモデルの表示名が残っている");
 });

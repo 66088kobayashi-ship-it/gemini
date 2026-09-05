@@ -194,6 +194,8 @@ export function mapErrorMessage(status, body) {
       return "OpenRouterの残高が尽きた";
     case 429:
       return "いま混んでいる。少し待って再試行してほしい";
+    case 502:
+      return "このモデルが応答を返さなかった。別のモデルを試してほしい";
     case 0:
       return "つながらなかった。もう一度試す";
     default:

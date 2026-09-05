@@ -6,7 +6,7 @@ import { assert, assertEquals, assertNotEquals } from "../_shared/test_util.ts";
 import { handleRunRequest, RunDeps } from "./handler.ts";
 import { AuthContext } from "../_shared/http_handlers.ts";
 import { CallModelFn, Plan } from "../_shared/engine.ts";
-import { InsufficientBalanceError, RateLimitedError } from "../_shared/openrouter.ts";
+import { EmptyResponseError, InsufficientBalanceError, RateLimitedError, UpstreamErrorResponse } from "../_shared/openrouter.ts";
 
 const OK_AUTH: AuthContext = { userId: "user-1", email: "ok@example.com" };
 const NO_KEY_ENV = (_name: string): string | undefined => undefined;
@@ -186,4 +186,69 @@ Deno.test("handleRunRequest: 429/402/401はすべて別のステータスにな�
   assertEquals(noAuth.status, 401);
   assertNotEquals(rateLimited.status, balance.status);
   assertNotEquals(rateLimited.status, noAuth.status);
+});
+
+// ---------------------------------------------------------------------------
+// モデルが実質応答しなかったケース(EmptyResponseError/UpstreamErrorResponse)は
+// 502で返る。500に丸めず、402/404/429とも別のステータスにする
+// ---------------------------------------------------------------------------
+
+Deno.test("handleRunRequest: EmptyResponseErrorは500ではなく502で返る", async () => {
+  const callModel: CallModelFn = async () => {
+    throw new EmptyResponseError({
+      finishReason: "stop",
+      messageKeys: [],
+      usage: null,
+      reasoningOnly: false,
+      choicesEmpty: true,
+    });
+  };
+  const deps = baseDeps({ callModel });
+  const res = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), deps);
+  assertEquals(res.status, 502);
+  const body = await res.json();
+  assert(String(body.error).length > 0);
+});
+
+Deno.test("handleRunRequest: UpstreamErrorResponseは500ではなく502で返る", async () => {
+  const callModel: CallModelFn = async () => {
+    throw new UpstreamErrorResponse({ message: "上流の失敗", code: "provider_error" });
+  };
+  const deps = baseDeps({ callModel });
+  const res = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), deps);
+  assertEquals(res.status, 502);
+});
+
+Deno.test("handleRunRequest: 502は429/402/404/401とはすべて別のステータスになる", async () => {
+  const emptyResponseDeps = baseDeps({
+    callModel: async () => {
+      throw new EmptyResponseError({
+        finishReason: null,
+        messageKeys: [],
+        usage: null,
+        reasoningOnly: false,
+        choicesEmpty: true,
+      });
+    },
+  });
+  const rateLimitedDeps = baseDeps({
+    callModel: async () => {
+      throw new RateLimitedError();
+    },
+  });
+  const balanceDeps = baseDeps({
+    callModel: async () => {
+      throw new InsufficientBalanceError();
+    },
+  });
+
+  const empty = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), emptyResponseDeps);
+  const rateLimited = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), rateLimitedDeps);
+  const balance = await handleRunRequest(makeRequest(makePlanBody(), "Bearer good-jwt"), balanceDeps);
+
+  assertEquals(empty.status, 502);
+  assertNotEquals(empty.status, rateLimited.status);
+  assertNotEquals(empty.status, balance.status);
+  assertNotEquals(empty.status, 401);
+  assertNotEquals(empty.status, 404);
 });
