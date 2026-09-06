@@ -398,3 +398,114 @@ export function viewsThatMustBeHidden(screen) {
   }
   return SCREEN_NAMES.filter((v) => v !== screen);
 }
+
+// ---------------------------------------------------------------------------
+// メッセージ本文の最小限のMarkdown整形
+//
+// モデルの出力はMarkdown記法混じりの生テキストで返ってくるため、そのまま
+// 表示すると `**` や `##` が画面にそのまま出て読みにくい。外部のMarkdown
+// パーサは追加せず、太字(**)・見出し(#〜######)・箇条書き(-/*)・改行の保持
+// の4つだけを自前で最小限変換する。それ以外の記法（リンク・テーブル・
+// コードブロック等）は特別扱いせず、記号ごとそのままエスケープして表示する
+// （記号を消さない、壊れた表示にしない）。
+//
+// セキュリティ上の必須要件: モデルの出力は信用できない文字列である。
+// renderMessageMarkdown() が返すHTML文字列に、入力テキストの中身が
+// タグとして混入することは無い。抽出した各テキスト片は必ず escapeHtml() を
+// 経由してからタグで囲んでいるため（この関数自身が組み立てる
+// <p>/<h1>〜<h6>/<ul>/<li>/<strong>/<br> 以外のタグが出力に現れることはない）。
+// ---------------------------------------------------------------------------
+
+/** HTML特殊文字をエスケープする。 */
+export function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+
+/** 1行ぶんのテキストを **太字** の境界で分割する。閉じていない ** は
+ * リテラルな文字としてそのまま扱う（壊れた表示にしない）。
+ * @param {string} line
+ * @returns {Array<{text: string, bold: boolean}>}
+ */
+function parseInlineRuns(line) {
+  const runs = [];
+  const re = /\*\*(.+?)\*\*/g;
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(line)) !== null) {
+    if (m.index > lastIndex) {
+      runs.push({ text: line.slice(lastIndex, m.index), bold: false });
+    }
+    runs.push({ text: m[1], bold: true });
+    lastIndex = re.lastIndex;
+  }
+  if (lastIndex < line.length || runs.length === 0) {
+    runs.push({ text: line.slice(lastIndex), bold: false });
+  }
+  return runs;
+}
+
+/** runsを、必ずescapeHtml()を経由させてからHTML文字列に変換する。
+ * ここが安全性の要（生のテキストがそのままタグとして混入する経路が無い）。 */
+function runsToHtml(runs) {
+  return runs.map((r) => {
+    const escaped = escapeHtml(r.text);
+    return r.bold ? `<strong>${escaped}</strong>` : escaped;
+  }).join("");
+}
+
+/**
+ * モデルの出力テキストを、最小限のMarkdownとして解釈した安全なHTML文字列に
+ * 変換する。対応するのは太字(**)・見出し(#〜######)・箇条書き(-/*)・
+ * 改行の保持のみ。それ以外の記法は記号ごとそのままエスケープして表示する。
+ *
+ * 返り値は innerHTML にそのまま代入してよい（escapeHtml() を必ず経由して
+ * いるため、入力テキストの中身がタグとして解釈されることは無い）。
+ * @param {string} text
+ * @returns {string}
+ */
+export function renderMessageMarkdown(text) {
+  const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const htmlParts = [];
+  let paragraphLines = [];
+  let listItems = [];
+
+  function flushParagraph() {
+    if (paragraphLines.length === 0) return;
+    const html = paragraphLines.map((l) => runsToHtml(parseInlineRuns(l))).join("<br>");
+    htmlParts.push(`<p>${html}</p>`);
+    paragraphLines = [];
+  }
+  function flushList() {
+    if (listItems.length === 0) return;
+    const html = listItems.map((l) => `<li>${runsToHtml(parseInlineRuns(l))}</li>`).join("");
+    htmlParts.push(`<ul>${html}</ul>`);
+    listItems = [];
+  }
+
+  for (const line of lines) {
+    const headingMatch = /^(#{1,6})\s+(.*)$/.exec(line);
+    const bulletMatch = /^[-*]\s+(.*)$/.exec(line);
+
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = headingMatch[1].length;
+      htmlParts.push(`<h${level}>${runsToHtml(parseInlineRuns(headingMatch[2]))}</h${level}>`);
+    } else if (bulletMatch) {
+      flushParagraph();
+      listItems.push(bulletMatch[1]);
+    } else if (line.trim().length === 0) {
+      flushParagraph();
+      flushList();
+    } else {
+      flushList();
+      paragraphLines.push(line);
+    }
+  }
+  flushParagraph();
+  flushList();
+
+  return htmlParts.join("");
+}

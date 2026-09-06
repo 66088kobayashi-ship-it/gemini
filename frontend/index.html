@@ -185,7 +185,7 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
 .step b{min-width:34px;text-align:center;font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
 .rounds .cost{margin-left:auto;font-size:12px;color:var(--muted);text-align:right;line-height:1.4}
 
-.log{flex:1;overflow-y:auto;padding:var(--s3) var(--s2) var(--s2);
+.log{flex:1;overflow-y:auto;padding:var(--s3) var(--s1) var(--s2);
   -webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:14px}
 .pin{align-self:stretch;background:color-mix(in srgb,var(--yamabuki) 12%,transparent);
   border:1px solid color-mix(in srgb,var(--yamabuki) 34%,transparent);
@@ -194,10 +194,18 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
 .lap{align-self:center;font-size:11px;color:var(--muted);
   border:1px solid var(--cloth-hi);border-radius:999px;padding:3px 12px}
 
-.msg{display:flex;gap:10px;align-items:flex-end;max-width:78%}
+.msg{display:flex;gap:var(--s1);align-items:flex-end;max-width:96%}
 .msg .who{font-size:11px;color:var(--muted);margin:0 0 4px 2px}
-.bub{background:var(--cloth);border-radius:4px 16px 16px 16px;padding:11px 15px;max-width:60ch}
-.bub p{margin:0}
+.bub{background:var(--cloth);border-radius:4px 16px 16px 16px;padding:var(--s1) var(--s1);max-width:60ch}
+.bub p{margin:0 0 6px}
+.bub p:last-child{margin-bottom:0}
+.bub h1,.bub h2,.bub h3,.bub h4,.bub h5,.bub h6{font-size:16px;font-weight:700;margin:0 0 6px;line-height:1.4}
+.bub h1:last-child,.bub h2:last-child,.bub h3:last-child,
+.bub h4:last-child,.bub h5:last-child,.bub h6:last-child{margin-bottom:0}
+.bub ul{margin:0 0 6px;padding-left:1.2em}
+.bub ul:last-child{margin-bottom:0}
+.bub li{margin:2px 0}
+.bub strong{font-weight:700}
 .msg.me{align-self:flex-end;flex-direction:row-reverse}
 .msg.me .bub{background:#3A5AA0;color:#EAF0FA;border-radius:16px 4px 16px 16px}
 .msg.in{animation:rise .34s var(--ease) both}
@@ -347,12 +355,14 @@ import {
   canSubmit,
   composeRunRequest,
   endReasonLabel,
+  escapeHtml,
   extractOAuthErrorText,
   groupByLap,
   interpretRunResponse,
   isResumable,
   mapErrorMessage,
   mapOAuthError,
+  renderMessageMarkdown,
   resumeCallsNeeded,
   SCREEN_NAMES,
   stripBossEntry,
@@ -423,7 +433,6 @@ const canvas=$('canvas'), gdefs=$('gdefs'), glinks=$('glinks'),
 
 const avatar=r=>`<span class="av" style="--c:${r.hex}"><svg><use href="#${r.icon}"/></svg></span>`;
 const calls=()=>plan.before.length+plan.loop.length*plan.rounds+plan.after.length;
-const escapeHtml=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 /* ---- 円に並べる。輪は自動で閉じる ---- */
 function layout(){
@@ -735,10 +744,15 @@ function renderTranscriptInto(target, transcript, loopLength){
     for(const entry of lapEntries){
       const r=ROLES[entry.role] || {hex:'#8593AE',icon:'i-check',display:''};
       const isPass=entry.text.trim().startsWith('PASS');
-      const body=isPass?`<span class="pass">${escapeHtml(entry.text)}</span>`:escapeHtml(entry.text);
+      // 検収のPASS/FAIL判定文言（短い定型文）はこれまで通りescapeのみで表示する。
+      // それ以外のモデル出力は最小限のMarkdownとして整形する。どちらの経路も
+      // escapeHtml()を必ず経由するため、モデルの出力がタグとして混入することは無い。
+      const bodyHtml=isPass
+        ?`<p><span class="pass">${escapeHtml(entry.text)}</span></p>`
+        :renderMessageMarkdown(entry.text);
       const d=document.createElement('div'); d.className='msg in';
       d.innerHTML=avatar(r)+`<div><div class="who">${escapeHtml(entry.label)} · ${escapeHtml(r.display||'')}</div>`+
-        `<div class="bub"><p>${body}</p></div></div>`;
+        `<div class="bub">${bodyHtml}</div></div>`;
       target.appendChild(d); target.scrollTop=target.scrollHeight;
     }
   });
