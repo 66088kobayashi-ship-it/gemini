@@ -7,6 +7,7 @@ import {
   canResume,
   canSubmit,
   composeRunRequest,
+  DEFAULT_VISIBLE_VIEW,
   endReasonLabel,
   extractOAuthErrorText,
   groupByLap,
@@ -15,8 +16,10 @@ import {
   mapErrorMessage,
   mapOAuthError,
   resumeCallsNeeded,
+  SCREEN_NAMES,
   stripBossEntry,
   validateSupabaseUrl,
+  viewsThatMustBeHidden,
 } from "./logic.js";
 
 // 既存のマジックリンクのエラー文言（index.html に直書き、壊していないことの
@@ -495,3 +498,57 @@ Deno.test("canResume: 条件を満たせば再開可", () => {
   const r = canResume({ resumable: true, callsNeeded: 6, quotaRemaining: 10 });
   assertEquals(r.ok, true);
 });
+
+// ---------------------------------------------------------------------------
+// 画面遷移の対応表: viewsThatMustBeHidden
+//
+// 実際に一度、履歴詳細(detail)画面ぶんの「#loomを隠すCSSルール」を書き忘れ、
+// レイアウトが崩れるバグが起きた（#loomはSCREEN_NAMESの中で唯一、既定で
+// 可視のホーム画面であり、他の画面がアクティブなときは明示的に隠す必要が
+// ある）。ここではSCREEN_NAMES/viewsThatMustBeHidden自体の整合性を検証する。
+// CSSが実際にこの対応表どおりに書かれているかは frontend/screen_wiring.test.ts
+// で index.html のテキストと突き合わせて検証する（このファイルの範囲外）。
+// ---------------------------------------------------------------------------
+
+Deno.test("SCREEN_NAMES: gate/loom/room/history/detailの5画面が含まれる", () => {
+  assertEquals(new Set(SCREEN_NAMES).size, SCREEN_NAMES.length, "重複がある");
+  for (const name of ["gate", "loom", "room", "history", "detail"]) {
+    assert(SCREEN_NAMES.includes(name), `${name}がSCREEN_NAMESに無い`);
+  }
+  assertEquals(SCREEN_NAMES.length, 5);
+});
+
+Deno.test("DEFAULT_VISIBLE_VIEW: loomはSCREEN_NAMESに含まれる", () => {
+  assert(SCREEN_NAMES.includes(DEFAULT_VISIBLE_VIEW));
+});
+
+Deno.test("viewsThatMustBeHidden: 未知の画面名は例外になる", () => {
+  assertThrows(() => viewsThatMustBeHidden("unknown-screen"));
+  assertThrows(() => viewsThatMustBeHidden(""));
+});
+
+Deno.test("viewsThatMustBeHidden: 各画面で「自分以外の全画面」を返す（ちょうど1画面だけ可視という不変条件）", () => {
+  for (const screen of SCREEN_NAMES) {
+    const hidden = viewsThatMustBeHidden(screen);
+    assertEquals(hidden.length, SCREEN_NAMES.length - 1);
+    assert(!hidden.includes(screen), `${screen}が自分自身を隠す対象に含んでいる`);
+    for (const other of SCREEN_NAMES) {
+      if (other === screen) continue;
+      assert(hidden.includes(other), `${screen}のとき${other}を隠す対象に含んでいない`);
+    }
+  }
+});
+
+Deno.test("viewsThatMustBeHidden: 全画面についてDEFAULT_VISIBLE_VIEW(loom)を隠す対象に含む（自分自身を除く）", () => {
+  // これが今回のバグの核心: detail画面のときにloomを隠す対象から
+  // 漏れていた。SCREEN_NAMESから画面を1つでも落とすと、この対応表自体が
+  // 不完全になり、この検証が崩れる（次のテストで確認）。
+  for (const screen of SCREEN_NAMES) {
+    if (screen === DEFAULT_VISIBLE_VIEW) continue;
+    assert(
+      viewsThatMustBeHidden(screen).includes(DEFAULT_VISIBLE_VIEW),
+      `${screen}画面のとき、${DEFAULT_VISIBLE_VIEW}を隠す対象に含まれていない`,
+    );
+  }
+});
+
