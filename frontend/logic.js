@@ -350,3 +350,51 @@ const BOSS_ROLE = "boss";
 export function stripBossEntry(transcript) {
   return transcript.filter((e) => e.role !== BOSS_ROLE);
 }
+
+// ---------------------------------------------------------------------------
+// 画面遷移（gate/loom/room/history/detail）の対応表
+//
+// 実際に一度、履歴詳細(detail)画面ぶんの「#loomを隠すCSSルール」を書き忘れ、
+// #loomのトレイ・条件欄・開始ボタンが履歴詳細画面に透けて表示される
+// レイアウト崩れが起きた。これは、このプロジェクトで3回目の
+// 「純粋関数はテスト済みだが、それを使う配線が未テスト」という失敗の形
+// （1: instructionがモデルに渡っていなかった、2: OPENROUTER_API_KEYの
+// チェックが認証より前にあった、3: 今回）。
+//
+// CSSの実際の描画そのものはdeno testでは検証できない（ブラウザが無いため）。
+// ここでできるのは、「画面名の集合」と「各画面でどのviewを隠すべきか」を
+// 唯一の正典（single source of truth）として書き出し、それ自体の整合性
+// （未知の画面名を検出できるか、画面を1つ追加し忘れたら気づけるか）を
+// テストすること。加えて、frontend/screen_wiring.test.ts で、この対応表と
+// index.html の実際のCSS文字列との整合（#loomを隠すルールが全画面ぶん
+// 揃っているか）を機械的に突き合わせる。
+// ---------------------------------------------------------------------------
+
+/** アプリが持つ画面名の全て。setScreen() はこれ以外の名前を拒否する。
+ * 新しい画面を追加したら、まずここに追記すること。 */
+export const SCREEN_NAMES = ["gate", "loom", "room", "history", "detail"];
+
+/** #loom だけ、他の画面（gate/room/history/detail）と違って既定で可視の
+ * 「ホーム画面」であり、既定で非表示のベースCSSルールを持たない
+ * （他の画面は `#room{opacity:0;...}` のように、既定非表示のCSSがあり、
+ * 自分がアクティブなときだけ明示的に可視にする、という安全な作りになって
+ * いる）。そのため #loom だけは、自分以外の画面がアクティブなときに
+ * 明示的に隠すCSSルールが画面ごとに必要で、新しい画面を追加するたびに
+ * 書き忘れるリスクがある（実際に一度起きた）。 */
+export const DEFAULT_VISIBLE_VIEW = "loom";
+
+/**
+ * screen を表示しているとき、可視であってはいけない view id の一覧を返す
+ * （= SCREEN_NAMES から screen 自身を除いた残り全部。「ちょうど1画面だけが
+ * 可視であるべき」という不変条件をそのまま表す）。
+ * 未知の画面名を渡すと例外を投げる（画面を追加したのに SCREEN_NAMES への
+ * 追記を忘れた場合や、呼び出し側のタイプミスをその場で検出するため）。
+ * @param {string} screen
+ * @returns {string[]}
+ */
+export function viewsThatMustBeHidden(screen) {
+  if (!SCREEN_NAMES.includes(screen)) {
+    throw new Error(`viewsThatMustBeHidden: unknown screen "${screen}"`);
+  }
+  return SCREEN_NAMES.filter((v) => v !== screen);
+}

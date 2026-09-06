@@ -29,7 +29,15 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 :focus-visible{outline:2px solid var(--paper);outline-offset:4px;border-radius:6px}
 
 .stage{position:fixed;inset:0}
-.view{position:absolute;inset:0;transition:transform .42s var(--ease),opacity .3s var(--ease)}
+/* isolation:isolate で全画面(.view)に必ず自前のスタッキングコンテキストを
+   持たせる。#loom の子要素(.bar/.dock)にはz-index(40/30)があり、#loomが
+   スタッキングコンテキストを持たない状態（opacity:1・transform:noneのまま
+   ＝隠すルールの書き忘れ）だと、そのz-indexが兄弟の.viewより前面に
+   飛び出してしまう。isolationはそれを画面ごとに閉じ込める保険であり、
+   「#loomを隠すCSSルールを書く」こと自体の代わりにはならない
+   （隠すルール自体は各data-screenごとに必要）。 */
+.view{position:absolute;inset:0;isolation:isolate;
+  transition:transform .42s var(--ease),opacity .3s var(--ease)}
 #room{transform:translateX(100%);opacity:0;pointer-events:none}
 body[data-screen="room"] #loom{transform:translateX(-16%) scale(.96);opacity:0;pointer-events:none}
 body[data-screen="room"] #room{transform:translateX(0);opacity:1;pointer-events:auto}
@@ -46,6 +54,13 @@ body[data-screen="gate"] #loom{transform:translateX(100%) scale(.96);opacity:0;p
 #detail{transform:translateX(100%);opacity:0;pointer-events:none}
 body[data-screen="history"] #loom{transform:translateX(-16%) scale(.96);opacity:0;pointer-events:none}
 body[data-screen="history"] #history{transform:translateX(0);opacity:1;pointer-events:auto}
+/* 実際に一度、detail画面ぶんのこの#loom非表示ルールを書き忘れ、#loomの
+   トレイ・条件欄・開始ボタンが履歴詳細画面に透けて見えるレイアウト崩れが
+   起きた。#loomは既定で可視の「ホーム画面」であり、既定非表示のベース
+   ルールを持たないため、#loom以外の画面が有効なときは必ずここで明示的に
+   隠す必要がある（frontend/logic.js の viewsThatMustBeHidden() が、この
+   「画面ごとに必要なルール」の対応表を機械的に検証する）。 */
+body[data-screen="detail"] #loom{transform:translateX(-16%) scale(.96);opacity:0;pointer-events:none}
 body[data-screen="detail"] #history{transform:translateX(-16%) scale(.96);opacity:0;pointer-events:none}
 body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-events:auto}
 #history,#detail{background:var(--room);display:flex;flex-direction:column}
@@ -339,6 +354,7 @@ import {
   mapErrorMessage,
   mapOAuthError,
   resumeCallsNeeded,
+  SCREEN_NAMES,
   stripBossEntry,
   validateSupabaseUrl,
 } from "./logic.js";
@@ -557,11 +573,11 @@ openBtn.onclick=()=>{
   $('faces').innerHTML=plan.loop.map(n=>avatar(ROLES[n.kind])).join('');
   logEl.innerHTML=`<div class="pin"><b>条件</b>${escapeHtml(critEl.value.trim())}</div>`+
     `<div class="empty">周回数を決めて、指示を書いて Enter</div>`;
-  document.body.dataset.screen='room';refresh();
+  setScreen('room');refresh();
   setTimeout(()=>promptEl.focus(),460);
   refreshQuota();
 };
-$('back').onclick=()=>{document.body.dataset.screen='loom';promptEl.blur();};
+$('back').onclick=()=>{setScreen('loom');promptEl.blur();};
 
 promptEl.addEventListener('input',()=>{
   promptEl.style.height='auto';
@@ -591,7 +607,18 @@ const APP_URL = (() => {
 const gateEmail=$('gateEmail'), gateSend=$('gateSend'), gateVerdict=$('gateVerdict'), googleSend=$('googleSend');
 let resendTimer=null;
 
-function setScreen(name){ document.body.dataset.screen=name; }
+/* 画面遷移の唯一の入口。SCREEN_NAMES（logic.js）に無い名前を渡すと
+ * 即座に例外にする。実際に一度、履歴詳細(detail)画面ぶんの#loomを隠す
+ * CSSルールを書き忘れたバグが起きたため、少なくとも「画面名そのものの
+ * タイプミス・書き忘れ」はここで機械的に検出できるようにする
+ * （CSS側の対応漏れそのものはブラウザでしか検証できないが、
+ * screen_wiring.test.tsでテキストレベルの整合は確認している）。 */
+function setScreen(name){
+  if(!SCREEN_NAMES.includes(name)){
+    throw new Error(`setScreen: unknown screen "${name}"`);
+  }
+  document.body.dataset.screen=name;
+}
 
 function startResendCooldown(){
   let remaining=60;
@@ -852,7 +879,7 @@ resumeMinusBtn.onclick=()=>{ addedRounds=Math.max(1,addedRounds-1); updateResume
 resumePlusBtn.onclick =()=>{ addedRounds=Math.min(10,addedRounds+1); updateResumeUI(); };
 
 async function openDetail(runId){
-  document.body.dataset.screen='detail';
+  setScreen('detail');
   detailLog.innerHTML=`<div class="empty">読み込み中…</div>`;
   resumeRoundsEl.hidden=true; resumeRowEl.hidden=true;
   const { data, error } = await supabase
@@ -929,9 +956,9 @@ resumeBtn.onclick=async()=>{
   refreshQuota();
 };
 
-$('openHistory').onclick=async()=>{ document.body.dataset.screen='history'; await loadHistory(); };
-$('historyBack').onclick=()=>{ document.body.dataset.screen='loom'; };
-$('detailBack').onclick=()=>{ document.body.dataset.screen='history'; };
+$('openHistory').onclick=async()=>{ setScreen('history'); await loadHistory(); };
+$('historyBack').onclick=()=>{ setScreen('loom'); };
+$('detailBack').onclick=()=>{ setScreen('history'); };
 
 const tray=$('tray');
 for(const [k,r] of Object.entries(ROLES)){

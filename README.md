@@ -12,6 +12,9 @@ frontend/
                                     # CSS/HTML構造は変更していない
   logic.js                         # フロントの純粋ロジック（DOM非依存）
   logic.test.ts                    # ↑のテスト
+  screen_wiring.test.ts            # index.htmlをテキストとして読み、画面
+                                    # 遷移CSSの対応漏れを機械的に検出する
+                                    # （実行はしない。既知の限界は本文参照）
   config.js                        # Supabase URL/anonキー・モデル設定
                                     # （書き換えるだけでよい）
 
@@ -72,7 +75,7 @@ supabase/
 ブラウザでしか実行できないため自動テストの対象に入っていない。
 
 この構造（純粋関数はテスト済みだが、それを呼ぶ配線は未テスト）は、
-このプロジェクトで**既に2回バグを生んでいる**:
+このプロジェクトで**既に3回バグを生んでいる**:
 
 - 指示欄に打った文字列が `/run` に渡っておらず、モデルに一切届いていなかった
   （`buildRunBody` 自体は正しくテストされていたが、`index.html` 側が
@@ -81,21 +84,55 @@ supabase/
   `Deno.serve` コールバックの中、JWT検証・allowlist照合より前にあった
   （`handleRun` 自体は正しくテストされていたが、それを呼ぶ外側の
   エントリポイントは未テストだった）
+- 履歴詳細(`detail`)画面ぶんの「`#loom` を隠すCSSルール」を書き忘れ、
+  `#loom` のトレイ・条件欄・開始ボタンが履歴詳細画面に透けて表示される
+  レイアウト崩れが起きた（`#room`/`#history` を隠すルールは書けていたのに、
+  同じパターンを `detail` にだけ書き忘れた）
 
-後者は `supabase/functions/run/handler.ts` への切り出しで解決済み
-（`Deno.serve` を薄いラッパーにし、本体を named export にしてテストする）。
-**`frontend/index.html` にも同じ対処（配線部分を `frontend/app.js` 等に
-切り出し、DOM操作以外の呼び出し順序をテストする）が可能なはずだが、
-今は実施しない。** 実機確認を優先するため、ここでは将来の課題として
-記録するだけにとどめる。
+1番目・2番目は解決済み（`buildRunBody`の必須化、
+`supabase/functions/run/handler.ts` への切り出し）。
+**`frontend/index.html` の配線コード自体を丸ごと切り出してテストする
+（`frontend/app.js` 等に分離し、DOM操作以外の呼び出し順序をテストする）
+対処はまだ実施していない。** 実機確認を優先するため、ここでは将来の課題
+として記録するだけにとどめる。
 
-履歴一覧・詳細・再開の画面（`#history`/`#detail`、`loadHistory()`/
-`openDetail()`/`resumeBtn.onclick` 等）も同じ理由で自動テストの対象外。
+3番目（画面遷移のCSS書き忘れ）への対処として、`frontend/logic.js` に
+`SCREEN_NAMES`/`DEFAULT_VISIBLE_VIEW`/`viewsThatMustBeHidden()` を追加した。
+`SCREEN_NAMES` は画面名（`gate`/`loom`/`room`/`history`/`detail`）の唯一の
+正典で、`index.html` の `setScreen()` はこれ以外の画面名を拒否する。
+`viewsThatMustBeHidden(screen)` は「screenを表示しているとき隠すべき
+view idの一覧」を返す純粋関数で、`logic.test.ts` でその整合性
+（未知の画面名の検出、画面を1つ追加し忘れたら気づけるか）をテストしている。
+
+**ただしこれには明確な限界がある。** `viewsThatMustBeHidden()` はあくまで
+「本来こうあるべき」という対応表（スペック）であり、`index.html` の実際の
+CSSがその通りに書かれているかどうかまでは、この関数自体のテストでは
+検証できない。この隙間を埋めるため、`frontend/screen_wiring.test.ts` を
+追加した。これは `index.html` を**実行はせず**、単なるテキストとして読み、
+`body[data-screen="X"] #loom{...}` という形のCSSルールが対応表どおりに
+（`viewsThatMustBeHidden()` が要求する画面ぶん）文字列として存在するかを
+正規表現で機械的に確認する。**これは静的なテキスト照合であり、ブラウザが
+そのCSSを実際にどう解釈・適用するか（本当に非表示になるか、スタッキングが
+正しいか）までは保証しない。** 実際にこの負の対照実験でも確認した:
+
+- `body[data-screen="detail"] #loom{...}` を削る → `screen_wiring.test.ts`
+  が**検出できた**（今回のバグそのものの再現）
+- `.view` の `isolation:isolate`（`.bar`/`.dock` のz-indexが兄弟画面の
+  前面に飛び出すのを防ぐ構造的な保険）を削る → **どのテストも検出できな
+  かった**。`isolation` はCSSの実際のスタッキング計算という、テキスト照合
+  でもロジックのユニットテストでも届かない領域の性質のため。これを検出
+  するには実ブラウザでのレンダリング検証（Playwright等）が必要だが、
+  外部ライブラリを増やさない方針のため今は導入しない。**このプロパティを
+  誤って削除・変更しても自動テストは気づけない、という限界として記録する。**
+
+履歴一覧・詳細・再開の画面（`loadHistory()`/`openDetail()`/
+`resumeBtn.onclick` 等、DOM操作そのもの）も同じ理由で自動テストの対象外。
 これらが呼ぶ純粋関数（`isResumable`/`endReasonLabel`/`buildResumeRequest`/
-`resumeCallsNeeded`/`canResume`）自体は `logic.test.ts` でテスト済みだが、
-それを呼ぶ `index.html` 側の配線（`supabase.from('runs').select(...)` の
-呼び出しや、続きから実行後に画面を更新する処理）はブラウザでしか検証
-できない。実機確認チェックリストに手順を追加して補う（下記D節）。
+`resumeCallsNeeded`/`canResume`/`viewsThatMustBeHidden`）自体は
+`logic.test.ts` でテスト済みだが、それを呼ぶ `index.html` 側の配線
+（`supabase.from('runs').select(...)` の呼び出しや、続きから実行後に
+画面を更新する処理）はブラウザでしか検証できない。実機確認チェックリスト
+に手順を追加して補う（下記D節）。
 
 ### モデルIDは静的サイトなので「環境変数」ではなく `config.js` で上書きする
 
@@ -347,7 +384,11 @@ anon key は `config.js` 経由でブラウザに公開される（設計通り�
         新しい順で出ること・日時/構成/周回数/終了理由/消費回数が表示
         されることを確認する
       - 一覧の行をタップし、詳細画面で保存済みの transcript が会話室と
-        同じ見た目で表示されることを確認する
+        同じ見た目・同じ幅で表示されること、反物画面（トレイ・条件欄・
+        開始ボタン）や履歴一覧のヘッダーが透けて見えたり重なったりして
+        いないことを確認する（実際に一度、`#loom` を隠すCSSルールの
+        書き忘れでこれが崩れたことがある。`isolation:isolate` の効果は
+        自動テストで検出できないため、ここが唯一の確認手段）
       - **周回上限で終わった実行**（検収役なし、または検収がPASSしない
         まま周回を使い切った実行）を1件作り、その詳細に「続きから」の
         導線が出ることを確認する
