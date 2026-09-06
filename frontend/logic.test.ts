@@ -9,12 +9,14 @@ import {
   composeRunRequest,
   DEFAULT_VISIBLE_VIEW,
   endReasonLabel,
+  escapeHtml,
   extractOAuthErrorText,
   groupByLap,
   interpretRunResponse,
   isResumable,
   mapErrorMessage,
   mapOAuthError,
+  renderMessageMarkdown,
   resumeCallsNeeded,
   SCREEN_NAMES,
   stripBossEntry,
@@ -549,6 +551,142 @@ Deno.test("viewsThatMustBeHidden: 全画面についてDEFAULT_VISIBLE_VIEW(loom
       viewsThatMustBeHidden(screen).includes(DEFAULT_VISIBLE_VIEW),
       `${screen}画面のとき、${DEFAULT_VISIBLE_VIEW}を隠す対象に含まれていない`,
     );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// escapeHtml
+// ---------------------------------------------------------------------------
+
+Deno.test("escapeHtml: & < > \" ' をすべてエスケープする", () => {
+  assertEquals(escapeHtml(`&<>"'`), "&amp;&lt;&gt;&quot;&#39;");
+});
+
+Deno.test("escapeHtml: 通常の日本語テキストはそのまま", () => {
+  assertEquals(escapeHtml("これは提案です。"), "これは提案です。");
+});
+
+// ---------------------------------------------------------------------------
+// renderMessageMarkdown: 太字・見出し・箇条書き・改行の最小限の変換
+// ---------------------------------------------------------------------------
+
+Deno.test("renderMessageMarkdown: **太字**がstrongタグになり、**が画面に残らない", () => {
+  const html = renderMessageMarkdown("これは**重要**です。");
+  assert(html.includes("<strong>重要</strong>"));
+  assert(!html.includes("**"), `**が残っている: ${html}`);
+});
+
+Deno.test("renderMessageMarkdown: 閉じていない**はリテラルな文字のまま残る（壊れた表示にしない）", () => {
+  const html = renderMessageMarkdown("これは**閉じていません");
+  assert(!html.includes("<strong>"), "閉じていないのにstrongタグが作られている");
+  assert(html.includes("**"), "閉じていない**が消えてしまっている");
+});
+
+Deno.test("renderMessageMarkdown: #〜######が見出しタグになる", () => {
+  for (let level = 1; level <= 6; level++) {
+    const hashes = "#".repeat(level);
+    const html = renderMessageMarkdown(`${hashes} 批判役結論`);
+    assert(html.includes(`<h${level}>批判役結論</h${level}>`), `level=${level}: ${html}`);
+    assert(!html.includes(hashes + " "), `#が画面に残っている: ${html}`);
+  }
+});
+
+Deno.test("renderMessageMarkdown: #の直後にスペースが無ければ見出しにしない（ハッシュタグ等の誤爆防止）", () => {
+  const html = renderMessageMarkdown("#タグ ではなく本文");
+  assert(!/<h[1-6]>/.test(html));
+  assert(html.includes("#タグ"));
+});
+
+Deno.test("renderMessageMarkdown: -または*で始まる行が箇条書きになる", () => {
+  const html = renderMessageMarkdown("- 項目1\n- 項目2\n* 項目3");
+  assert(html.includes("<ul>"));
+  assert(html.includes("<li>項目1</li>"));
+  assert(html.includes("<li>項目2</li>"));
+  assert(html.includes("<li>項目3</li>"));
+});
+
+Deno.test("renderMessageMarkdown: 改行が保持される（同じ段落内はbrで区切られる）", () => {
+  const html = renderMessageMarkdown("1行目\n2行目\n3行目");
+  assert(html.includes("1行目<br>2行目<br>3行目"), html);
+});
+
+Deno.test("renderMessageMarkdown: 空行で段落が区切られ、空の段落は出力されない", () => {
+  const html = renderMessageMarkdown("段落1\n\n段落2");
+  assert(html.includes("<p>段落1</p>"));
+  assert(html.includes("<p>段落2</p>"));
+  assert(!html.includes("<p></p>"));
+});
+
+Deno.test("renderMessageMarkdown: 対応しない記法（リンク・テーブル・コード）は記号ごとそのまま表示される", () => {
+  const cases = [
+    "[リンク](https://example.com)",
+    "| a | b |",
+    "`code`",
+    "```\nblock\n```",
+  ];
+  for (const c of cases) {
+    const html = renderMessageMarkdown(c);
+    // 記号を含む生テキストがエスケープされた形でそのまま残っている
+    // （消えてもいないし、変な壊れ方もしていない）
+    const escaped = escapeHtml(c);
+    assert(html.includes(escaped) || html.split("<br>").join("\n") === `<p>${escaped}</p>`, html);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// renderMessageMarkdown: セキュリティ（最優先） — モデルの出力に含まれる
+// <script>/<img onerror=...> がタグとして混入しないことを、出力文字列を
+// 直接検証することで確認する。deno testにはDOM/ブラウザが無いため
+// 「実行されないこと」を直接は確認できないが、出力に unescaped な
+// <script> や <img ...> が一切現れないことを保証すれば、ブラウザがそれを
+// タグとして解釈すること自体が原理的に起こり得ない。
+// ---------------------------------------------------------------------------
+
+Deno.test("renderMessageMarkdown: <script>タグを含む出力がエスケープされる（平文）", () => {
+  const html = renderMessageMarkdown("<script>alert(1)</script>");
+  assert(!html.includes("<script>"), `エスケープされていない: ${html}`);
+  assert(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), html);
+});
+
+Deno.test("renderMessageMarkdown: <img onerror=...>を含む出力がエスケープされる（平文）", () => {
+  const html = renderMessageMarkdown('<img src=x onerror=alert(1)>');
+  assert(!html.includes("<img "), `エスケープされていない: ${html}`);
+  assert(html.includes("&lt;img"), html);
+});
+
+Deno.test("renderMessageMarkdown: **太字**の中の<script>もエスケープされる", () => {
+  const html = renderMessageMarkdown("**<script>alert(1)</script>**");
+  assert(!html.includes("<script>"), `エスケープされていない: ${html}`);
+  assert(html.includes("<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>"), html);
+});
+
+Deno.test("renderMessageMarkdown: 見出しの中の<img onerror=...>もエスケープされる", () => {
+  const html = renderMessageMarkdown("## <img src=x onerror=alert(1)>");
+  assert(!html.includes("<img "), `エスケープされていない: ${html}`);
+  assert(html.includes("<h2>&lt;img"), html);
+});
+
+Deno.test("renderMessageMarkdown: 箇条書きの中の<script>もエスケープされる", () => {
+  const html = renderMessageMarkdown("- <script>alert(1)</script>");
+  assert(!html.includes("<script>"), `エスケープされていない: ${html}`);
+  assert(html.includes("<li>&lt;script&gt;alert(1)&lt;/script&gt;</li>"), html);
+});
+
+Deno.test("renderMessageMarkdown: 出力に現れるタグは想定した装飾タグ(p/h1-6/ul/li/strong/br)以外に無い", () => {
+  const dangerousInputs = [
+    "<script>alert(1)</script>",
+    '<img src=x onerror=alert(1)>',
+    "<svg onload=alert(1)>",
+    "<a href=javascript:alert(1)>click</a>",
+    "**<iframe src=javascript:alert(1)></iframe>**",
+  ];
+  const allowedTags = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "li", "strong", "br"]);
+  for (const input of dangerousInputs) {
+    const html = renderMessageMarkdown(input);
+    const tags = [...html.matchAll(/<\/?([a-zA-Z0-9]+)[^>]*>/g)].map((m) => m[1].toLowerCase());
+    for (const tag of tags) {
+      assert(allowedTags.has(tag), `想定外のタグ <${tag}> が出力に含まれている（入力: ${input}）: ${html}`);
+    }
   }
 });
 
