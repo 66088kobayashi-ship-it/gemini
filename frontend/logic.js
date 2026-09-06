@@ -509,3 +509,61 @@ export function renderMessageMarkdown(text) {
 
   return htmlParts.join("");
 }
+
+// ---------------------------------------------------------------------------
+// 履歴の題名（instruction の冒頭から機械的に作る。モデルには生成させない）
+//
+// 追加のAPI呼び出しをゼロにするため、モデルに題名を作らせず、既に
+// runs.plan に保存されている instruction（ユーザー自身が書いた指示）の
+// 冒頭から導出する。新しい配管が不要なので、過去に保存済みの実行にも
+// 遡って題名が付く。
+//
+// セキュリティ: instruction はユーザー入力であり信用できない。
+// deriveHistoryTitle() はプレーンな文字列を返すだけで、HTMLタグは
+// 一切組み立てない。呼び出し側は escapeHtml() を経由してから innerHTML に
+// 入れるか、textContent で挿入すること（renderMessageMarkdownとは違い、
+// この関数自体はHTMLエスケープを行わない・行う必要が無い——プレーン
+// テキストしか返さないため）。
+// ---------------------------------------------------------------------------
+
+const HISTORY_TITLE_MAX_LENGTH = 30;
+const HISTORY_TITLE_ELLIPSIS = "…";
+
+/**
+ * runs.plan.instruction の冒頭から、履歴一覧・詳細用の題名を作る。
+ * - 改行は空白に畳み、連続する空白は1つにまとめ、前後の空白を除去する
+ * - 見出し(#〜######)・箇条書き(-/*)の行頭記号、**太字**の記号を除去する
+ *   （中身のテキストは残す。記号だけを取り除く）
+ * - 日本語はコードポイント単位（文字数）で数える。UTF-16のコード単位数や
+ *   UTF-8のバイト数では数えない（サロゲートペア文字を2文字と誤カウント
+ *   しない）
+ * - HISTORY_TITLE_MAX_LENGTH文字を超える場合は切り詰め、末尾に省略記号を付ける
+ * - instructionが空/空白のみ、または記号を除去した結果が空になった場合は
+ *   fallbackをそのまま返す（呼び出し側が輪の構成表示などを渡す）
+ * @param {string} instruction
+ * @param {string} fallback
+ * @returns {string}
+ */
+export function deriveHistoryTitle(instruction, fallback) {
+  const text = String(instruction ?? "");
+  if (text.trim().length === 0) {
+    return fallback;
+  }
+
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const withoutBlockMarkers = lines
+    .map((line) => line.replace(/^#{1,6}\s+/, "").replace(/^[-*]\s+/, ""))
+    .join(" ");
+  const withoutBold = withoutBlockMarkers.replace(/\*\*(.+?)\*\*/g, "$1");
+  const collapsed = withoutBold.replace(/\s+/g, " ").trim();
+
+  if (collapsed.length === 0) {
+    return fallback;
+  }
+
+  const chars = Array.from(collapsed); // コードポイント単位で数える
+  if (chars.length <= HISTORY_TITLE_MAX_LENGTH) {
+    return collapsed;
+  }
+  return chars.slice(0, HISTORY_TITLE_MAX_LENGTH).join("") + HISTORY_TITLE_ELLIPSIS;
+}

@@ -164,9 +164,10 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
 .rhead{flex:none;display:flex;align-items:center;gap:12px;padding:0 var(--s2);
   padding-top:env(safe-area-inset-top);height:64px;
   background:var(--cloth);border-bottom:1px solid var(--cloth-hi)}
+.rhead .rinfo{min-width:0;overflow:hidden}
 .back{min-width:var(--tap);min-height:var(--tap);display:grid;place-items:center;font-size:26px}
-.rtitle{font-weight:500;font-size:16px}
-.rsub{font-size:11px;color:var(--muted)}
+.rtitle{font-weight:500;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rsub{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .faces{margin-left:auto;display:flex}
 .av{width:32px;height:32px;border-radius:11px;flex:none;display:grid;place-items:center;
   background:color-mix(in srgb,var(--c) 20%,var(--cloth));
@@ -191,6 +192,9 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
   border:1px solid color-mix(in srgb,var(--yamabuki) 34%,transparent);
   border-radius:12px;padding:10px 14px;font-size:13px}
 .pin b{color:var(--yamabuki);font-weight:700;margin-right:6px}
+.hist-title{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hist-meta{font-size:11px;color:var(--muted);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lap{align-self:center;font-size:11px;color:var(--muted);
   border:1px solid var(--cloth-hi);border-radius:999px;padding:3px 12px}
 
@@ -292,7 +296,7 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
   <section class="view" id="room" aria-label="会話室">
     <div class="rhead">
       <button class="back" id="back" aria-label="輪に戻る">‹</button>
-      <div><div class="rtitle" id="rtitle">会話室</div><div class="rsub" id="rsub"></div></div>
+      <div class="rinfo"><div class="rtitle" id="rtitle">会話室</div><div class="rsub" id="rsub"></div></div>
       <div class="faces" id="faces"></div>
     </div>
     <div class="rounds">
@@ -316,7 +320,7 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
   <section class="view" id="history" aria-label="履歴">
     <div class="rhead">
       <button class="back" id="historyBack" aria-label="輪に戻る">‹</button>
-      <div><div class="rtitle">履歴</div></div>
+      <div class="rinfo"><div class="rtitle">履歴</div></div>
     </div>
     <div class="log" id="historyLog"></div>
   </section>
@@ -324,7 +328,7 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
   <section class="view" id="detail" aria-label="実行の詳細">
     <div class="rhead">
       <button class="back" id="detailBack" aria-label="履歴に戻る">‹</button>
-      <div><div class="rtitle" id="detailTitle">実行の詳細</div><div class="rsub" id="detailSub"></div></div>
+      <div class="rinfo"><div class="rtitle" id="detailTitle">実行の詳細</div><div class="rsub" id="detailSub"></div></div>
     </div>
     <div class="log" id="detailLog"></div>
     <div class="rounds" id="resumeRounds" hidden>
@@ -354,6 +358,7 @@ import {
   canResume,
   canSubmit,
   composeRunRequest,
+  deriveHistoryTitle,
   endReasonLabel,
   escapeHtml,
   extractOAuthErrorText,
@@ -863,12 +868,14 @@ async function loadHistory(){
   historyLog.innerHTML='';
   for(const row of data){
     const roles=(row.plan?.loop||[]).map(s=>ROLES[s.role]?.label||s.role).join('→');
+    const title=deriveHistoryTitle(row.plan?.instruction, roles||'(構成なし)');
     const b=document.createElement('button');
     b.className='pin';
     b.style.cssText='min-height:var(--tap);display:block;text-align:left;width:100%;margin-bottom:10px';
-    b.innerHTML=`<b>${escapeHtml(endReasonLabel(row.verdict))}</b>`+
+    b.innerHTML=`<div class="hist-title">${escapeHtml(title)}</div>`+
+      `<div class="hist-meta">${escapeHtml(endReasonLabel(row.verdict))} ・ `+
       `${escapeHtml(formatDateTime(row.created_at))} ・ ${escapeHtml(roles)} ・ `+
-      `${row.plan?.rounds ?? '?'}周 ・ ${row.calls_actual}回`;
+      `${row.plan?.rounds ?? '?'}周 ・ ${row.calls_actual}回</div>`;
     b.onclick=()=>openDetail(row.id);
     historyLog.appendChild(b);
   }
@@ -904,8 +911,10 @@ async function openDetail(runId){
   if(error || !data){ detailLog.innerHTML=`<div class="empty">読み込めなかった</div>`; return; }
   currentDetail=data;
   const roles=(data.plan?.loop||[]).map(s=>ROLES[s.role]?.label||s.role).join('→');
-  detailTitle.textContent=roles||'実行の詳細';
-  detailSub.textContent=`${data.plan?.rounds ?? '?'}周 ・ ${endReasonLabel(data.verdict)}`;
+  // detailTitle/detailSubはtextContentで挿入するため、instruction（ユーザー
+  // 入力）由来の題名がタグとして解釈される経路は無い。
+  detailTitle.textContent=deriveHistoryTitle(data.plan?.instruction, roles||'実行の詳細');
+  detailSub.textContent=`${roles} ・ ${data.plan?.rounds ?? '?'}周 ・ ${endReasonLabel(data.verdict)}`;
   detailLog.innerHTML=`<div class="pin"><b>条件</b>${escapeHtml(data.plan?.criteria||'')}</div>`;
   renderTranscriptInto(detailLog, data.transcript||[], data.plan?.loop?.length||1);
 
@@ -953,7 +962,8 @@ resumeBtn.onclick=async()=>{
   }
 
   currentDetail={ ...currentDetail, transcript:outcome.transcript, verdict:outcome.verdict };
-  detailSub.textContent=`${currentDetail.plan?.rounds ?? '?'}周 ・ ${endReasonLabel(outcome.verdict)}`;
+  const resumedRoles=(currentDetail.plan?.loop||[]).map(s=>ROLES[s.role]?.label||s.role).join('→');
+  detailSub.textContent=`${resumedRoles} ・ ${currentDetail.plan?.rounds ?? '?'}周 ・ ${endReasonLabel(outcome.verdict)}`;
   detailLog.innerHTML=`<div class="pin"><b>条件</b>${escapeHtml(currentDetail.plan?.criteria||'')}</div>`;
   renderTranscriptInto(detailLog, outcome.transcript, currentDetail.plan?.loop?.length||1);
   if(outcome.kind==='partial'){ showErrorInto(detailLog, outcome.warning); }
