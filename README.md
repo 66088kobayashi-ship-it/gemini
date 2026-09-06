@@ -612,3 +612,22 @@ deno test frontend/ supabase/functions/_shared/
   `logic.test.ts` の文字列検証に加え、Playwrightで実際にブラウザに
   レンダリングして `alert()` が呼ばれないことも確認した（レビュー時の
   一時的な確認であり、リポジトリには追加していない）。
+- **履歴の題名**: モデルに題名を生成させない（追加のAPI呼び出しをゼロに
+  する。無料枠は1日50回しかないため）。代わりに、既に `runs.plan` に
+  保存されている `instruction`（ユーザー自身が書いた指示）の冒頭から
+  `frontend/logic.js` の `deriveHistoryTitle()` で機械的に作る。新しい
+  配管が不要なので、**過去に保存済みの実行にも遡って題名が付く**。
+  改行を空白に畳み、連続する空白を1つにまとめ、見出し(`#`)・箇条書き
+  (`-`/`*`)の行頭記号と`**太字**`の記号だけを取り除いたうえで、30
+  **文字**（UTF-16のコード単位数やUTF-8のバイト数ではなく、
+  `Array.from()` によるコードポイント単位）を超えたら省略記号を付けて
+  切り詰める。`instruction` が空、または記号除去後に空になった場合は
+  呼び出し側が渡す `fallback`（輪の構成表示）を返す。
+  `deriveHistoryTitle()` 自体はプレーンな文字列しか返さずHTMLタグを
+  組み立てないため、`frontend/index.html` 側で `escapeHtml()` を経由
+  してから `innerHTML` に入れる（履歴一覧の行）か、`textContent` で
+  挿入する（履歴詳細のヘッダー）ことで安全性を担保している。
+  長い題名でもレイアウトが崩れないよう、`.hist-title`/`.rtitle` に
+  `white-space:nowrap;overflow:hidden;text-overflow:ellipsis` を
+  適用し、JS側の30文字カット＋CSS側の省略表示の二重の対策にしている
+  （Playwrightで実際に描画し、行の幅が広がらないことを確認済み）。

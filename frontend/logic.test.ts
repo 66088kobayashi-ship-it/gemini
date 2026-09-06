@@ -8,6 +8,7 @@ import {
   canSubmit,
   composeRunRequest,
   DEFAULT_VISIBLE_VIEW,
+  deriveHistoryTitle,
   endReasonLabel,
   escapeHtml,
   extractOAuthErrorText,
@@ -688,5 +689,105 @@ Deno.test("renderMessageMarkdown: 出力に現れるタグは想定した装飾�
       assert(allowedTags.has(tag), `想定外のタグ <${tag}> が出力に含まれている（入力: ${input}）: ${html}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// deriveHistoryTitle: instruction の冒頭から履歴の題名を作る
+// ---------------------------------------------------------------------------
+
+Deno.test("deriveHistoryTitle: instructionの冒頭がそのまま題名になる（短い場合）", () => {
+  assertEquals(deriveHistoryTitle("新製品の告知文を書いてほしい", "fallback"), "新製品の告知文を書いてほしい");
+});
+
+Deno.test("deriveHistoryTitle: 改行が空白に畳まれ、1行に収まる", () => {
+  const title = deriveHistoryTitle("新製品の\n告知文を\n書いてほしい", "fallback");
+  assert(!title.includes("\n"), `改行が残っている: ${JSON.stringify(title)}`);
+  assertEquals(title, "新製品の 告知文を 書いてほしい");
+});
+
+Deno.test("deriveHistoryTitle: 連続する空白が1つにまとめられ、前後の空白が除去される", () => {
+  const title = deriveHistoryTitle("  新製品の   告知文   ", "fallback");
+  assertEquals(title, "新製品の 告知文");
+});
+
+Deno.test("deriveHistoryTitle: 長いinstructionは30文字で切られ、省略記号が付く", () => {
+  const long = "あ".repeat(50);
+  const title = deriveHistoryTitle(long, "fallback");
+  assert(title.endsWith("…"), `省略記号が付いていない: ${title}`);
+  assertEquals(Array.from(title.replace("…", "")).length, 30);
+});
+
+Deno.test("deriveHistoryTitle: 30文字以下なら省略記号が付かない", () => {
+  const exact = "あ".repeat(30);
+  const title = deriveHistoryTitle(exact, "fallback");
+  assertEquals(title, exact);
+  assert(!title.includes("…"));
+});
+
+Deno.test("deriveHistoryTitle: 日本語はコードポイント単位（文字数）で正しく数えられる（バイト数では切れない）", () => {
+  // "あ"はUTF-8で3バイト。バイト数で30バイト分切ると10文字しか残らない誤りを検出する。
+  const long = "あ".repeat(40);
+  const title = deriveHistoryTitle(long, "fallback");
+  const bodyLength = Array.from(title.replace("…", "")).length;
+  assertEquals(bodyLength, 30, `文字数ではなくバイト数で切られている可能性: ${bodyLength}文字`);
+});
+
+Deno.test("deriveHistoryTitle: サロゲートペア文字（絵文字）も1文字として数える", () => {
+  // 😀 はUTF-16ではサロゲートペア(2コード単位)。.lengthで数えると誤って2文字になる。
+  const text = "😀".repeat(35);
+  const title = deriveHistoryTitle(text, "fallback");
+  const bodyLength = Array.from(title.replace("…", "")).length;
+  assertEquals(bodyLength, 30, "サロゲートペアが2文字として誤カウントされている可能性");
+});
+
+Deno.test("deriveHistoryTitle: **太字**の記号が題名に残らない（中身は残る）", () => {
+  const title = deriveHistoryTitle("**重要**な告知文を書いて", "fallback");
+  assert(!title.includes("**"), `**が残っている: ${title}`);
+  assert(title.includes("重要"));
+});
+
+Deno.test("deriveHistoryTitle: 見出し(#)の記号が題名に残らない", () => {
+  const title = deriveHistoryTitle("## 新製品の告知", "fallback");
+  assert(!title.includes("#"), `#が残っている: ${title}`);
+  assert(title.includes("新製品の告知"));
+});
+
+Deno.test("deriveHistoryTitle: 箇条書き(-/*)の記号が題名に残らない", () => {
+  assertEquals(deriveHistoryTitle("- 項目1", "fallback"), "項目1");
+  assertEquals(deriveHistoryTitle("* 項目2", "fallback"), "項目2");
+});
+
+Deno.test("deriveHistoryTitle: instructionが空/空白のみならfallbackを返す", () => {
+  assertEquals(deriveHistoryTitle("", "提案→批判"), "提案→批判");
+  assertEquals(deriveHistoryTitle("   \n  \n  ", "提案→批判"), "提案→批判");
+  assertEquals(deriveHistoryTitle(undefined as unknown as string, "提案→批判"), "提案→批判");
+  assertEquals(deriveHistoryTitle(null as unknown as string, "提案→批判"), "提案→批判");
+});
+
+Deno.test("deriveHistoryTitle: 記号を除去した結果が空になる場合もfallbackを返す", () => {
+  assertEquals(deriveHistoryTitle("## ", "提案→批判"), "提案→批判");
+  assertEquals(deriveHistoryTitle("**  **", "提案→批判"), "提案→批判");
+});
+
+// ---------------------------------------------------------------------------
+// deriveHistoryTitle: セキュリティ（instructionはユーザー入力）
+//
+// deriveHistoryTitle自体はプレーンテキストしか返さないためHTMLタグを
+// 一切組み立てない。ここでは、危険な文字列を渡してもその中身が
+// タグ構造として解釈可能な形に変換されないこと（<script>等が依然として
+// ただの文字列であること）を確認する。実際の画面表示では、呼び出し側が
+// これをescapeHtml()してからinnerHTMLに入れる（index.html参照）。
+// ---------------------------------------------------------------------------
+
+Deno.test("deriveHistoryTitle: <script>等を含むinstructionもプレーンテキストとして返る（タグ化されない）", () => {
+  const title = deriveHistoryTitle("<script>alert(1)</script>を書いて", "fallback");
+  // deriveHistoryTitle自身はエスケープしないので生の文字列のままだが、
+  // <が実際のタグとして解釈可能な形に変換・埋め込みされていないことを確認する
+  // （HTML断片を組み立てていない、という設計の裏付け）。
+  assert(title.includes("<script>alert(1)</script>"), `中身が保持されていない: ${title}`);
+  // escapeHtml()を通せば安全な文字列になることを確認する（実際の呼び出し経路）
+  const escaped = escapeHtml(title);
+  assert(!escaped.includes("<script>"), `escapeHtml後もscriptタグが残っている: ${escaped}`);
+  assert(escaped.includes("&lt;script&gt;"));
 });
 
