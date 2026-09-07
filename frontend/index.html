@@ -188,7 +188,17 @@ body[data-screen="detail"] #detail{transform:translateX(0);opacity:1;pointer-eve
 
 .log{flex:1;overflow-y:auto;padding:var(--s3) var(--s1) var(--s2);
   -webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:14px}
-.pin{align-self:stretch;background:color-mix(in srgb,var(--yamabuki) 12%,transparent);
+/* flex-shrink:0 — .pin は .log（flex-direction:column）の子として並ぶため、
+   デフォルトのflex-shrink:1のままだと、行数が多く.logの表示領域を超えた
+   ときにflexboxが各行を自然な高さより縮めてしまう。履歴一覧を2段構成
+   （題名+メタ情報）にした際、行に付けていたmin-height（元は1行時代の
+   タップ領域確保のためだけの値）が、縮小後の「実質的な上限」として働き、
+   メタ情報が枠からはみ出すバグになった。flex-shrink:0で常に自然な高さ
+   （content-based）を維持し、.logのoverflow-y:autoにスクロールを任せる。
+   縦スクロールする一覧をflex columnで組むときは、子要素にflex-shrink:0
+   を付けない限り、min-height/min-widthは常にこの種の事故の種になりうる
+   （詳細はREADME「既知の限界」参照）。 */
+.pin{align-self:stretch;flex-shrink:0;background:color-mix(in srgb,var(--yamabuki) 12%,transparent);
   border:1px solid color-mix(in srgb,var(--yamabuki) 34%,transparent);
   border-radius:12px;padding:10px 14px;font-size:13px}
 .pin b{color:var(--yamabuki);font-weight:700;margin-right:6px}
@@ -871,6 +881,12 @@ async function loadHistory(){
     const title=deriveHistoryTitle(row.plan?.instruction, roles||'(構成なし)');
     const b=document.createElement('button');
     b.className='pin';
+    // min-height:var(--tap) は残す（タップ領域48pxの明示は他の操作可能要素
+    // 全てと同じ約束事）。.pinにflex-shrink:0を付けたことで、この値が
+    // 「縮小後の実質的な上限」として働く経路は無くなっている
+    // （2段構成の自然な高さは常に48pxを上回るため、実質的には無効化された
+    // 下限だが、将来1段構成に戻す可能性や、題名・メタ情報が極端に短い
+    // 場合の保険として、他の要素との一貫性を優先して残す）。
     b.style.cssText='min-height:var(--tap);display:block;text-align:left;width:100%;margin-bottom:10px';
     b.innerHTML=`<div class="hist-title">${escapeHtml(title)}</div>`+
       `<div class="hist-meta">${escapeHtml(endReasonLabel(row.verdict))} ・ `+
